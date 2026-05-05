@@ -1,0 +1,160 @@
+package org.trybunal.provider.ollama;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.trybunal.api.model.GenerationParams;
+import org.trybunal.api.model.InvocationMetadata;
+import org.trybunal.api.model.InvocationResult;
+import org.trybunal.api.model.Message;
+import org.trybunal.api.model.ModelId;
+import org.trybunal.api.spi.ModelProvider;
+
+/**
+ * {@link ModelProvider} backed by a local Ollama daemon
+ * (default host {@code http://localhost:11434}).
+ *
+ * <p>The host can be overridden via the {@code OLLAMA_HOST} environment
+ * variable or by passing it to the constructor.</p>
+ *
+ * <p>Speaks to {@code POST /api/chat} with {@code stream=false} and maps the
+ * response into Trybunal's domain types. Pure I/O — all timing, logging, and
+ * tool dispatch live in the harness layer per the Trybunal Pattern.</p>
+ */
+public final class OllamaProvider implements ModelProvider {
+
+    public static final String ID = "ollama";
+    private static final Logger log = LoggerFactory.getLogger(OllamaProvider.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    private final URI baseUri;
+    private final HttpClient http;
+
+    public OllamaProvider() {
+        this(resolveDefaultHost());
+    }
+
+    public OllamaProvider(String baseUri) {
+        if (baseUri == null || baseUri.isBlank())
+            throw new IllegalArgumentException("baseUri required");
+        this.baseUri = URI.create(baseUri.endsWith("/") ? baseUri.substring(0, baseUri.length() - 1) : baseUri);
+        this.http = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+    }
+
+    private static String resolveDefaultHost() {
+        String env = System.getenv("OLLAMA_HOST");
+        return (env == null || env.isBlank()) ? "http://localhost:11434" : env;
+    }
+
+    @Override
+    public String id() { return ID; }
+
+    @Override
+    public boolean supports(ModelId modelId) {
+        return modelId != null && ID.equals(modelId.provider());
+    }
+
+    @Override
+    public InvocationResult invoke(List<Message> conversation, ModelId modelId, GenerationParams params) {
+        if (!supports(modelId))
+            throw new IllegalArgumentException("unsupported model: " + modelId);
+
+        ObjectNode body = JSON.createObjectNode();
+        body.put("model", modelId.name());
+        body.put("stream", false);
+        body.set("messages", encodeMessages(conversation));
+        body.set("options", encodeOptions(params));
+
+        HttpRequest req;
+        String json;
+        try {
+            json = JSON.writeValueAsString(body);
+        } catch (Exception e) {
+            throw new RuntimeException("failed to encode request", e);
+        }
+        req = HttpRequest.newBuilder(baseUri.resolve("/api/chat"))
+                .timeout(Duration.ofMinutes(5))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json))
+                .build();
+
+        Instant startedAt = Instant.now();
+        HttpResponse<String> resp;
+        try {
+            resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        } catch (Exception e) {
+            throw new RuntimeException("ollama transport error: " + e.getMessage(), e);
+        }
+        if (resp.statusCode() / 100 != 2) {
+            throw new RuntimeException("ollama returned " + resp.statusCode() + ": " + resp.body());
+        }
+
+        JsonNode root;
+        try {
+            root = JSON.readTree(resp.body());
+        } catch (Exception e) {
+            throw new RuntimeException("failed to parse ollama response", e);
+        }
+
+        String content = root.path("message").path("content").asText("");
+        String finishReason = root.path("done_reason").asText(null);
+        Integer promptTokens = root.has("prompt_eval_count") ? root.get("prompt_eval_count").asInt() : null;
+        Integer completionTokens = root.has("eval_count") ? root.get("eval_count").asInt() : null;
+
+        // Provider reports its own duration; harness will overwrite with measured wall-clock.
+        Duration providerDuration = root.has("total_duration")
+                ? Duration.ofNanos(root.get("total_duration").asLong())
+                : Duration.ZERO;
+
+        var metadata = new InvocationMetadata(
+                modelId, startedAt, providerDuration,
+                promptTokens, completionTokens, List.of(), finishReason);
+
+        log.debug("ollama call done finish={} promptTok={} complTok={}",
+                finishReason, promptTokens, completionTokens);
+
+        return new InvocationResult(Message.Assistant.of(content), metadata);
+    }
+
+    private static ArrayNode encodeMessages(List<Message> conversation) {
+        ArrayNode arr = JSON.createArrayNode();
+        for (Message m : conversation) {
+            ObjectNode node = JSON.createObjectNode();
+            node.put("role", roleOf(m));
+            node.put("content", m.content());
+            arr.add(node);
+        }
+        return arr;
+    }
+
+    private static String roleOf(Message m) {
+        return switch (m) {
+            case Message.System ignored -> "system";
+            case Message.User ignored -> "user";
+            case Message.Assistant ignored -> "assistant";
+            case Message.Tool ignored -> "tool";
+        };
+    }
+
+    private static ObjectNode encodeOptions(GenerationParams params) {
+        ObjectNode opts = JSON.createObjectNode();
+        if (params.temperature() != null) opts.put("temperature", params.temperature());
+        if (params.maxTokens() != null) opts.put("num_predict", params.maxTokens());
+        if (params.topP() != null) opts.put("top_p", params.topP());
+        if (params.seed() != null) opts.put("seed", params.seed());
+        params.providerExtras().forEach((k, v) -> opts.putPOJO(k, v));
+        return opts;
+    }
+}
