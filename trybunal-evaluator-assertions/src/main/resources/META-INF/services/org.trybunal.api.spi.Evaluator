@@ -1,1 +1,3 @@
 # evaluators registered in tasks 04/05
+org.trybunal.evaluator.assertions.ContainsEvaluator
+org.trybunal.evaluator.assertions.EqualsEvaluator

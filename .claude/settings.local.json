@@ -5,7 +5,8 @@
       "Bash(./gradlew :trybunal-api:build)",
       "Bash(./gradlew :trybunal-api:test --info)",
       "Bash(./gradlew :trybunal-evaluator-assertions:build)",
-      "Bash(./gradlew projects *)"
+      "Bash(./gradlew projects *)",
+      "Bash(./gradlew :trybunal-api:build :trybunal-evaluator-assertions:build)"
     ]
   }
 }

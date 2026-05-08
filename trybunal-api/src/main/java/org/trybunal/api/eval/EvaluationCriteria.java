@@ -17,18 +17,22 @@ import org.trybunal.api.model.ModelId;
 public sealed interface EvaluationCriteria
         permits EvaluationCriteria.TextMatch, EvaluationCriteria.LlmRubric {
 
-    /**
-     * Marker for code-based text assertions. Sealed; the {@code permits}
-     * clause is a placeholder — concrete records (Contains, Equals, Regex)
-     * are introduced by Tasks 04 and 05 by extending it.
-     *
-     * <p>{@link Placeholder} exists only to satisfy the JLS requirement that
-     * a sealed type have at least one permitted subtype until real subtypes
-     * are added. It carries no semantics and should not be matched against.</p>
-     */
-    sealed interface TextMatch extends EvaluationCriteria permits TextMatch.Placeholder {
-        /** Placeholder; removed by Task 04/05 once real {@link TextMatch} kinds exist. */
-        record Placeholder() implements TextMatch {}
+    /** Code-based text assertions. Sealed over {@link Contains} and {@link Equals} (Regex added in Task 05). */
+    sealed interface TextMatch extends EvaluationCriteria
+            permits TextMatch.Contains, TextMatch.Equals /*, TextMatch.Regex (Task 05) */ {
+
+        record Contains(String needle, boolean caseSensitive) implements TextMatch {
+            public Contains {
+                if (needle == null || needle.isEmpty())
+                    throw new IllegalArgumentException("needle required");
+            }
+        }
+
+        record Equals(String expected, boolean trim) implements TextMatch {
+            public Equals {
+                if (expected == null) throw new IllegalArgumentException("expected required");
+            }
+        }
     }
 
     /**
