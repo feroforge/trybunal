@@ -6,7 +6,10 @@
       "Bash(./gradlew :trybunal-api:test --info)",
       "Bash(./gradlew :trybunal-evaluator-assertions:build)",
       "Bash(./gradlew projects *)",
-      "Bash(./gradlew :trybunal-api:build :trybunal-evaluator-assertions:build)"
+      "Bash(./gradlew :trybunal-api:build :trybunal-evaluator-assertions:build)",
+      "Bash(./gradlew :trybunal-evaluator-assertions:test)",
+      "Bash(./gradlew :trybunal-evaluator-assertions:jar)",
+      "Bash(jshell --class-path __TRACKED_VAR__:__TRACKED_VAR__ -)"
     ]
   }
 }

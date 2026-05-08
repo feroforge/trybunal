@@ -17,9 +17,9 @@ import org.trybunal.api.model.ModelId;
 public sealed interface EvaluationCriteria
         permits EvaluationCriteria.TextMatch, EvaluationCriteria.LlmRubric {
 
-    /** Code-based text assertions. Sealed over {@link Contains} and {@link Equals} (Regex added in Task 05). */
+    /** Code-based text assertions. Sealed over {@link Contains}, {@link Equals}, and {@link Regex}. */
     sealed interface TextMatch extends EvaluationCriteria
-            permits TextMatch.Contains, TextMatch.Equals /*, TextMatch.Regex (Task 05) */ {
+            permits TextMatch.Contains, TextMatch.Equals, TextMatch.Regex {
 
         record Contains(String needle, boolean caseSensitive) implements TextMatch {
             public Contains {
@@ -32,6 +32,15 @@ public sealed interface EvaluationCriteria
             public Equals {
                 if (expected == null) throw new IllegalArgumentException("expected required");
             }
+        }
+
+        record Regex(String pattern, MatchMode mode) implements TextMatch {
+            public Regex {
+                if (pattern == null || pattern.isBlank())
+                    throw new IllegalArgumentException("pattern required");
+                if (mode == null) mode = MatchMode.FIND;
+            }
+            public enum MatchMode { FIND, FULL_MATCH }
         }
     }
 
