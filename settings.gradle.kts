@@ -9,5 +9,6 @@ include(
     "trybunal-api",
     "trybunal-core",
     "trybunal-provider-ollama",
+    "trybunal-evaluator-assertions",
     "examples:hello"
 )

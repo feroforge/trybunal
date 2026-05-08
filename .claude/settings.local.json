@@ -3,7 +3,9 @@
     "allow": [
       "Bash(./gradlew build *)",
       "Bash(./gradlew :trybunal-api:build)",
-      "Bash(./gradlew :trybunal-api:test --info)"
+      "Bash(./gradlew :trybunal-api:test --info)",
+      "Bash(./gradlew :trybunal-evaluator-assertions:build)",
+      "Bash(./gradlew projects *)"
     ]
   }
 }
