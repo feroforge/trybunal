@@ -10,7 +10,11 @@
       "Bash(./gradlew :trybunal-evaluator-assertions:test)",
       "Bash(./gradlew :trybunal-evaluator-assertions:jar)",
       "Bash(jshell --class-path __TRACKED_VAR__:__TRACKED_VAR__ -)",
-      "Bash(./gradlew :trybunal-evaluator-llm-judge:build)"
+      "Bash(./gradlew :trybunal-evaluator-llm-judge:build)",
+      "Bash(./gradlew :trybunal-evaluator-llm-judge:test)",
+      "Bash(./gradlew :trybunal-evaluator-llm-judge:compileJava -Xlint:deprecation)",
+      "Bash(./gradlew :trybunal-evaluator-llm-judge:compileJava --rerun-tasks -PcompilerArgs=-Xlint:deprecation)",
+      "Bash(./gradlew :trybunal-evaluator-llm-judge:jar)"
     ]
   }
 }
