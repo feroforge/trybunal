@@ -11,5 +11,6 @@ include(
     "trybunal-provider-ollama",
     "trybunal-evaluator-assertions",
     "trybunal-evaluator-llm-judge",
-    "examples:hello"
+    "examples:hello",
+    "examples:eval-demo"
 )

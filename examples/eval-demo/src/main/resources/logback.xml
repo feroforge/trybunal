@@ -1,0 +1,28 @@
+<configuration>
+
+  <!-- Normal INFO output to console -->
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <target>System.err</target>
+    <encoder>
+      <pattern>%d{HH:mm:ss} %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Full LLM I/O log, one entry per request/response pair -->
+  <appender name="LLM_IO_FILE" class="ch.qos.logback.core.FileAppender">
+    <file>build/llm-io.log</file>
+    <append>false</append>
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="trybunal.llm-io" level="DEBUG" additivity="false">
+    <appender-ref ref="LLM_IO_FILE" />
+  </logger>
+
+  <root level="INFO">
+    <appender-ref ref="CONSOLE" />
+  </root>
+
+</configuration>

@@ -16,7 +16,8 @@
       "Bash(./gradlew :trybunal-evaluator-llm-judge:compileJava --rerun-tasks -PcompilerArgs=-Xlint:deprecation)",
       "Bash(./gradlew :trybunal-evaluator-llm-judge:jar)",
       "Bash(./gradlew :trybunal-core:test)",
-      "Bash(./gradlew :trybunal-core:jar :trybunal-api:jar -q)"
+      "Bash(./gradlew :trybunal-core:jar :trybunal-api:jar -q)",
+      "Bash(./gradlew :examples:eval-demo:build)"
     ]
   }
 }

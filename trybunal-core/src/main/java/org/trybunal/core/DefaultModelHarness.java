@@ -25,6 +25,7 @@ import org.trybunal.api.spi.ModelProvider;
 public final class DefaultModelHarness implements ModelHarness {
 
     private static final Logger log = LoggerFactory.getLogger(DefaultModelHarness.class);
+    private static final Logger llmIo = LoggerFactory.getLogger("trybunal.llm-io");
 
     private final ModelProvider provider;
 
@@ -48,6 +49,23 @@ public final class DefaultModelHarness implements ModelHarness {
             log.debug("invoke start messages={}", conversation.size());
             InvocationResult raw = provider.invoke(conversation, modelId, params);
             Duration measured = Duration.ofNanos(System.nanoTime() - startNanos);
+
+            if (llmIo.isDebugEnabled()) {
+                StringBuilder sb = new StringBuilder();
+                sb.append(">>> REQUEST model=").append(modelId).append('\n');
+                for (Message m : conversation) {
+                    String role = switch (m) {
+                        case Message.System ignored    -> "system";
+                        case Message.User ignored      -> "user";
+                        case Message.Assistant ignored -> "assistant";
+                        case Message.Tool ignored      -> "tool";
+                    };
+                    sb.append('[').append(role).append("] ").append(m.content()).append('\n');
+                }
+                sb.append("<<< RESPONSE latencyMs=").append(measured.toMillis()).append('\n');
+                sb.append(raw.reply().content()).append('\n');
+                llmIo.debug("{}", sb);
+            }
 
             InvocationMetadata reconciled = new InvocationMetadata(
                     modelId,
