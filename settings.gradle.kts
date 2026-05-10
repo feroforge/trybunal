@@ -12,6 +12,7 @@ include(
     "trybunal-evaluator-assertions",
     "trybunal-evaluator-llm-judge",
     "trybunal-tool-web-search",
+    "trybunal-tool-web-fetch",
     "examples:hello",
     "examples:eval-demo",
     "examples:agentic-eval"
