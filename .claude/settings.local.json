@@ -23,7 +23,8 @@
       "Bash(./gradlew :trybunal-tool-web-search:build)",
       "Bash(./gradlew :trybunal-tool-web-fetch:build)",
       "Bash(./gradlew :trybunal-tool-safe-download:build)",
-      "Bash(./gradlew :trybunal-tool-safe-download:test)"
+      "Bash(./gradlew :trybunal-tool-safe-download:test)",
+      "Bash(./gradlew :trybunal-tool-citations:build)"
     ]
   }
 }

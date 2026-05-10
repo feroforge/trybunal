@@ -15,6 +15,7 @@ include(
     "trybunal-tool-web-fetch",
     "trybunal-tool-browser-playwright",
     "trybunal-tool-safe-download",
+    "trybunal-tool-citations",
     "examples:hello",
     "examples:eval-demo",
     "examples:agentic-eval"
