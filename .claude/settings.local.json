@@ -18,7 +18,8 @@
       "Bash(./gradlew :trybunal-core:test)",
       "Bash(./gradlew :trybunal-core:jar :trybunal-api:jar -q)",
       "Bash(./gradlew :examples:eval-demo:build)",
-      "Bash(./gradlew :examples:agentic-eval:build)"
+      "Bash(./gradlew :examples:agentic-eval:build)",
+      "Bash(./gradlew :trybunal-core:build)"
     ]
   }
 }
