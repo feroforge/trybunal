@@ -27,6 +27,7 @@ import org.trybunal.api.model.PromptSession;
 import org.trybunal.api.spi.Evaluator;
 import org.trybunal.api.spi.ModelHarness;
 import org.trybunal.api.spi.ModelProvider;
+import org.trybunal.api.spi.Tool;
 
 /**
  * Trybunal's central orchestrator. Holds the registry of {@link ModelProvider}
@@ -41,25 +42,42 @@ import org.trybunal.api.spi.ModelProvider;
 public final class Orchestrator implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(Orchestrator.class);
+    private static final int MAX_TOOL_ITERATIONS = 8;
 
     private final Map<String, ModelHarness> harnesses;
     private final List<Evaluator> evaluators;
+    private final List<Tool> tools;
     private final ExecutorService executor;
 
-    private Orchestrator(Map<String, ModelHarness> harnesses, List<Evaluator> evaluators) {
-        this.harnesses = Map.copyOf(harnesses);
+    private Orchestrator(List<ModelProvider> providers, List<Evaluator> evaluators, List<Tool> tools) {
+        var seenNames = new java.util.HashSet<String>();
+        for (Tool t : tools) {
+            if (!seenNames.add(t.spec().name())) {
+                throw new IllegalStateException("Duplicate tool name: " + t.spec().name());
+            }
+        }
+        this.tools = List.copyOf(tools);
         this.evaluators = List.copyOf(evaluators);
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
+
+        var byId = new HashMap<String, ModelHarness>();
+        for (ModelProvider p : providers) {
+            Objects.requireNonNull(p.id(), "provider id");
+            ModelHarness base = new DefaultModelHarness(p);
+            byId.put(p.id(), this.tools.isEmpty() ? base :
+                    new ToolCallingHarness(base, this.tools, MAX_TOOL_ITERATIONS, this.executor));
+        }
+        this.harnesses = Map.copyOf(byId);
     }
 
-    /** Discovers all registered {@link ModelProvider}s and {@link Evaluator}s via {@link ServiceLoader}. */
+    /** Discovers all registered {@link ModelProvider}s, {@link Evaluator}s, and {@link Tool}s via {@link ServiceLoader}. */
     public static Orchestrator autoDiscover() {
-        var byId = new HashMap<String, ModelHarness>();
+        var providers = new ArrayList<ModelProvider>();
         for (ModelProvider p : ServiceLoader.load(ModelProvider.class)) {
             log.info("registered provider id={} class={}", p.id(), p.getClass().getName());
-            byId.put(p.id(), new DefaultModelHarness(p));
+            providers.add(p);
         }
-        if (byId.isEmpty()) {
+        if (providers.isEmpty()) {
             log.warn("no ModelProvider implementations discovered on the classpath");
         }
         var evs = new ArrayList<Evaluator>();
@@ -67,16 +85,17 @@ public final class Orchestrator implements AutoCloseable {
             log.info("registered evaluator id={} class={}", e.id(), e.getClass().getName());
             evs.add(e);
         }
-        return new Orchestrator(byId, evs);
+        var tools = new ArrayList<Tool>();
+        for (Tool t : ServiceLoader.load(Tool.class)) {
+            log.info("registered tool name={} class={}", t.spec().name(), t.getClass().getName());
+            tools.add(t);
+        }
+        return new Orchestrator(providers, evs, tools);
     }
 
     /** Builds an orchestrator from an explicit provider list (test-friendly). */
     public static Orchestrator of(ModelProvider... providers) {
-        var byId = new HashMap<String, ModelHarness>();
-        for (ModelProvider p : providers) {
-            byId.put(Objects.requireNonNull(p.id(), "provider id"), new DefaultModelHarness(p));
-        }
-        return new Orchestrator(byId, List.of());
+        return new Orchestrator(List.of(providers), List.of(), List.of());
     }
 
     /**
@@ -86,11 +105,20 @@ public final class Orchestrator implements AutoCloseable {
      * @param evaluators evaluators; defensively copied
      */
     public static Orchestrator of(List<ModelProvider> providers, List<Evaluator> evaluators) {
-        var byId = new HashMap<String, ModelHarness>();
-        for (ModelProvider p : providers) {
-            byId.put(Objects.requireNonNull(p.id(), "provider id"), new DefaultModelHarness(p));
-        }
-        return new Orchestrator(byId, evaluators);
+        return of(providers, evaluators, List.of());
+    }
+
+    /**
+     * Builds an orchestrator from explicit provider, evaluator, and tool lists (test-friendly).
+     *
+     * @param providers  model providers; defensively copied
+     * @param evaluators evaluators; defensively copied
+     * @param tools      tools to register; names must be unique; defensively copied
+     * @throws IllegalStateException if two tools share the same name
+     */
+    public static Orchestrator of(List<ModelProvider> providers, List<Evaluator> evaluators,
+                                  List<Tool> tools) {
+        return new Orchestrator(providers, evaluators, tools);
     }
 
     /**
@@ -243,6 +271,35 @@ public final class Orchestrator implements AutoCloseable {
                 "Case errored: " + (errorMessage == null ? "(no message)" : errorMessage),
                 java.util.Map.of());
         return new EvaluationReport.CaseResult(aCase, inv, verdict);
+    }
+
+    /**
+     * Run the ReAct loop. Identical to {@link #chat} except tool calls are
+     * dispatched through the registered tools until the model returns a final
+     * answer or the iteration cap is hit.
+     *
+     * <p>Equivalent to {@link #chat} when no tools are registered.</p>
+     *
+     * @param session     prompt session; non-null
+     * @param modelId     target model; non-null
+     * @param userMessage user message; non-null
+     * @return invocation result; never null
+     */
+    public InvocationResult agent(PromptSession session, ModelId modelId, String userMessage) {
+        return chat(session, modelId, userMessage);
+    }
+
+    /**
+     * Tool names currently registered. Empty when no tools were supplied.
+     *
+     * @see #registeredProviders()
+     */
+    public java.util.Set<String> registeredTools() {
+        var names = new java.util.LinkedHashSet<String>();
+        for (Tool t : tools) {
+            names.add(t.spec().name());
+        }
+        return java.util.Collections.unmodifiableSet(names);
     }
 
     /** Provider ids currently registered. */
