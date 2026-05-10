@@ -11,6 +11,7 @@ include(
     "trybunal-provider-ollama",
     "trybunal-evaluator-assertions",
     "trybunal-evaluator-llm-judge",
+    "trybunal-tool-web-search",
     "examples:hello",
     "examples:eval-demo",
     "examples:agentic-eval"
