@@ -10,7 +10,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -128,7 +130,29 @@ public final class OllamaProvider implements ModelProvider {
             throw new RuntimeException("failed to parse ollama response", e);
         }
 
-        String content = root.path("message").path("content").asText("");
+        InvocationResult result = decodeResponse(root, modelId, startedAt);
+        var meta = result.metadata();
+        log.debug("ollama call done finish={} promptTok={} complTok={} thinking={}",
+                meta.finishReason(), meta.promptTokens(), meta.completionTokens(),
+                meta.providerExtras().containsKey("thinking"));
+        return result;
+    }
+
+    /**
+     * Decodes a parsed Ollama {@code /api/chat} response body into an
+     * {@link InvocationResult}. Extracted from {@link #invoke} so transport
+     * concerns and JSON shape concerns can be tested independently.
+     *
+     * <p>Captures {@code message.thinking} (when non-blank) under
+     * {@code providerExtras["thinking"]}. Models that route reasoning to a
+     * separate channel (gemma, gpt-oss with harmony, …) otherwise lose it
+     * entirely — and the thinking is exactly what's useful when a content
+     * field comes back empty.</p>
+     */
+    static InvocationResult decodeResponse(JsonNode root, ModelId modelId, Instant startedAt) {
+        JsonNode message = root.path("message");
+        String content = message.path("content").asText("");
+        String thinking = message.path("thinking").asText("");
         String finishReason = root.path("done_reason").asText(null);
         Integer promptTokens = root.has("prompt_eval_count") ? root.get("prompt_eval_count").asInt() : null;
         Integer completionTokens = root.has("eval_count") ? root.get("eval_count").asInt() : null;
@@ -138,12 +162,17 @@ public final class OllamaProvider implements ModelProvider {
                 ? Duration.ofNanos(root.get("total_duration").asLong())
                 : Duration.ZERO;
 
+        Map<String, Object> extras = Map.of();
+        if (!thinking.isBlank()) {
+            // LinkedHashMap so future extras retain insertion order in logs/snapshots.
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("thinking", thinking);
+            extras = m;
+        }
+
         var metadata = new InvocationMetadata(
                 modelId, startedAt, providerDuration,
-                promptTokens, completionTokens, List.of(), finishReason);
-
-        log.debug("ollama call done finish={} promptTok={} complTok={}",
-                finishReason, promptTokens, completionTokens);
+                promptTokens, completionTokens, List.of(), finishReason, extras);
 
         return new InvocationResult(Message.Assistant.of(content), metadata);
     }
