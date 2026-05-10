@@ -116,7 +116,7 @@ final class ModelTuning {
 
     private static GenerationParams withMaxTokens(GenerationParams base, int maxTokens) {
         return new GenerationParams(base.temperature(), maxTokens,
-                base.topP(), base.seed(), base.providerExtras());
+                base.topP(), base.seed(), base.providerExtras(), base.tools());
     }
 
     // ── Per-case nudges ──────────────────────────────────────────────────
@@ -181,7 +181,7 @@ final class ModelTuning {
             case "gpt-oss:20b::D1-tech-facts-args-speculation",
                  "gpt-oss:20b::D2-energy-facts-args-speculation" -> {
                 var bumped = new org.trybunal.api.model.GenerationParams(
-                        0.2, 8192, null, 42L, java.util.Map.of());
+                        0.2, 8192, null, 42L, java.util.Map.of(), java.util.List.of());
                 yield new EvaluationCase(c.name(), c.userMessage(), c.criteria(), bumped);
             }
 

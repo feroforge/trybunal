@@ -33,7 +33,7 @@ final class ReadinessSuite {
 
     /** Low-temperature session — these are evals, not creative writing. */
     static PromptSession buildSession() {
-        var params = new GenerationParams(0.2, 1024, null, 42L, Map.of());
+        var params = new GenerationParams(0.2, 1024, null, 42L, Map.of(), java.util.List.of());
         return new PromptSession(
                 null,
                 "agentic-readiness",

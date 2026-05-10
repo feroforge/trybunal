@@ -21,7 +21,9 @@ import org.trybunal.api.model.InvocationMetadata;
 import org.trybunal.api.model.InvocationResult;
 import org.trybunal.api.model.Message;
 import org.trybunal.api.model.ModelId;
+import org.trybunal.api.model.ToolCall;
 import org.trybunal.api.spi.ModelProvider;
+import org.trybunal.api.tool.ToolSpec;
 
 /**
  * {@link ModelProvider} backed by a local Ollama daemon
@@ -93,6 +95,9 @@ public final class OllamaProvider implements ModelProvider {
         params.providerExtras().forEach((k, v) -> {
             if (TOP_LEVEL_OPTIONS.contains(k)) body.putPOJO(k, v);
         });
+        if (!params.tools().isEmpty()) {
+            body.set("tools", encodeTools(params.tools()));
+        }
 
         HttpRequest req;
         String json;
@@ -162,6 +167,8 @@ public final class OllamaProvider implements ModelProvider {
                 ? Duration.ofNanos(root.get("total_duration").asLong())
                 : Duration.ZERO;
 
+        List<ToolCall> toolCalls = decodeToolCalls(message);
+
         Map<String, Object> extras = Map.of();
         if (!thinking.isBlank()) {
             // LinkedHashMap so future extras retain insertion order in logs/snapshots.
@@ -172,9 +179,9 @@ public final class OllamaProvider implements ModelProvider {
 
         var metadata = new InvocationMetadata(
                 modelId, startedAt, providerDuration,
-                promptTokens, completionTokens, List.of(), finishReason, extras);
+                promptTokens, completionTokens, toolCalls, finishReason, extras);
 
-        return new InvocationResult(Message.Assistant.of(content), metadata);
+        return new InvocationResult(new Message.Assistant(content, toolCalls), metadata);
     }
 
     private static ArrayNode encodeMessages(List<Message> conversation) {
@@ -209,5 +216,44 @@ public final class OllamaProvider implements ModelProvider {
             if (!TOP_LEVEL_OPTIONS.contains(k)) opts.putPOJO(k, v);
         });
         return opts;
+    }
+
+    static ArrayNode encodeTools(List<ToolSpec> tools) {
+        ArrayNode arr = JSON.createArrayNode();
+        for (ToolSpec spec : tools) {
+            ObjectNode entry = JSON.createObjectNode();
+            entry.put("type", "function");
+            ObjectNode fn = JSON.createObjectNode();
+            fn.put("name", spec.name());
+            fn.put("description", spec.description());
+            fn.set("parameters", JSON.valueToTree(spec.jsonSchema()));
+            entry.set("function", fn);
+            arr.add(entry);
+        }
+        return arr;
+    }
+
+    static List<ToolCall> decodeToolCalls(JsonNode message) {
+        JsonNode toolCallsNode = message.path("tool_calls");
+        if (!toolCallsNode.isArray() || toolCallsNode.isEmpty()) return List.of();
+        var result = new java.util.ArrayList<ToolCall>(toolCallsNode.size());
+        for (JsonNode node : toolCallsNode) {
+            JsonNode fn = node.path("function");
+            String name = fn.path("name").asText(null);
+            if (name == null || name.isBlank())
+                throw new IllegalArgumentException("tool_call entry missing function.name");
+            String id = node.path("id").asText(null);
+            if (id == null || id.isBlank())
+                id = "call_" + Integer.toHexString(System.identityHashCode(node));
+            JsonNode argsNode = fn.path("arguments");
+            Map<String, Object> args;
+            if (argsNode.isObject()) {
+                args = JSON.convertValue(argsNode, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+            } else {
+                args = Map.of();
+            }
+            result.add(new ToolCall(id, name, args));
+        }
+        return List.copyOf(result);
     }
 }

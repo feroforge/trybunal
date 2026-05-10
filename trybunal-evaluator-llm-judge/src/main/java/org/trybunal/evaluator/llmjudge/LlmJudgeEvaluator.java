@@ -114,7 +114,7 @@ public final class LlmJudgeEvaluator implements Evaluator {
         InvocationResult judged;
         try {
             judged = judge.invoke(conversation, rubric.judgeModel(),
-                    new GenerationParams(0.0, judgeMaxTokens(), null, null, Map.of()));
+                    new GenerationParams(0.0, judgeMaxTokens(), null, null, Map.of(), java.util.List.of()));
         } catch (RuntimeException e) {
             log.warn("judge invocation failed: {}", e.toString());
             return new EvaluationVerdict(false, 0.0, ID,
@@ -137,7 +137,7 @@ public final class LlmJudgeEvaluator implements Evaluator {
         InvocationResult judged;
         try {
             judged = judge.invoke(conversation, list.judgeModel(),
-                    new GenerationParams(0.0, judgeMaxTokens(), null, null, Map.of()));
+                    new GenerationParams(0.0, judgeMaxTokens(), null, null, Map.of(), java.util.List.of()));
         } catch (RuntimeException e) {
             log.warn("judge invocation failed: {}", e.toString());
             return new EvaluationVerdict(false, 0.0, ID,
