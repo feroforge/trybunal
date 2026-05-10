@@ -17,7 +17,8 @@
       "Bash(./gradlew :trybunal-evaluator-llm-judge:jar)",
       "Bash(./gradlew :trybunal-core:test)",
       "Bash(./gradlew :trybunal-core:jar :trybunal-api:jar -q)",
-      "Bash(./gradlew :examples:eval-demo:build)"
+      "Bash(./gradlew :examples:eval-demo:build)",
+      "Bash(./gradlew :examples:agentic-eval:build)"
     ]
   }
 }

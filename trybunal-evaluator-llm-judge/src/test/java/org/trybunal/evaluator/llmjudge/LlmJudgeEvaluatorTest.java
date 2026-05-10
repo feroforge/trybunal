@@ -141,4 +141,83 @@ class LlmJudgeEvaluatorTest {
         String result = JudgePromptTemplate.extractJsonBlock(input);
         assertEquals(input, result);
     }
+
+    // 8. <think>...</think> blocks are stripped before JSON extraction so a
+    // judge's scratch JSON inside its reasoning channel does not get parsed
+    // as the verdict.
+    @Test
+    void extractJsonBlockStripsClosedThinkBlock() {
+        String input = "<think>I am considering {\"passed\": false} as a draft</think>"
+                + "{\"passed\": true, \"score\": 1.0, \"rationale\": \"ok\"}";
+        String result = JudgePromptTemplate.extractJsonBlock(input);
+        assertEquals("{\"passed\": true, \"score\": 1.0, \"rationale\": \"ok\"}", result);
+    }
+
+    // 9. Unclosed <think>...EOF (judge token-starved mid-thought) results in
+    // null because the cleaned text contains nothing — caller surfaces a
+    // "no JSON block" rationale.
+    @Test
+    void extractJsonBlockUnclosedThinkReturnsNull() {
+        String input = "<think>I am still thinking and haven't reached the verdict";
+        assertNull(JudgePromptTemplate.extractJsonBlock(input));
+    }
+
+    // 10. Reasoning model self-judging with closed think block then verdict
+    @Test
+    void evaluateRubricToleratesThinkBlockJudge() {
+        String reply = "<think>Let me check the rubric and the candidate carefully.</think>"
+                + "{\"passed\": true, \"score\": 0.9, \"rationale\": \"matches rubric\"}";
+        var evaluator = new LlmJudgeEvaluator(stubJudge(reply));
+        EvaluationVerdict v = evaluator.evaluate(candidateResult("output"), rubric("anything"));
+        assertTrue(v.passed());
+        assertEquals(0.9, v.score(), 1e-9);
+    }
+
+    // 11. Checklist judge — happy path, all checks pass
+    @Test
+    void evaluateChecklistAllPass() {
+        String reply = "{\"results\": ["
+                + "{\"index\": 1, \"passed\": true, \"rationale\": \"ok\"},"
+                + "{\"index\": 2, \"passed\": true, \"rationale\": \"ok\"}"
+                + "]}";
+        var evaluator = new LlmJudgeEvaluator(stubJudge(reply));
+        var checklist = new EvaluationCriteria.LlmRubricChecklist(
+                java.util.List.of("check 1", "check 2"), JUDGE_ID);
+        EvaluationVerdict v = evaluator.evaluate(candidateResult("output"), checklist);
+        assertTrue(v.passed());
+        assertEquals(1.0, v.score(), 1e-9);
+        assertTrue(v.rationale().contains("2"), "rationale: " + v.rationale());
+    }
+
+    // 12. Checklist judge — partial pass: one check fails, score is 1/2,
+    //     passed=false, but the partial signal survives.
+    @Test
+    void evaluateChecklistPartialPass() {
+        String reply = "{\"results\": ["
+                + "{\"index\": 1, \"passed\": true, \"rationale\": \"ok\"},"
+                + "{\"index\": 2, \"passed\": false, \"rationale\": \"missed\"}"
+                + "]}";
+        var evaluator = new LlmJudgeEvaluator(stubJudge(reply));
+        var checklist = new EvaluationCriteria.LlmRubricChecklist(
+                java.util.List.of("check 1", "check 2"), JUDGE_ID);
+        EvaluationVerdict v = evaluator.evaluate(candidateResult("output"), checklist);
+        assertFalse(v.passed());
+        assertEquals(0.5, v.score(), 1e-9);
+        @SuppressWarnings("unchecked")
+        var details = (java.util.List<java.util.Map<String, Object>>) v.details().get("checks");
+        assertEquals(2, details.size());
+        assertEquals(false, details.get(1).get("passed"));
+    }
+
+    // 13. Checklist judge — judge omitted some checks: missing entries fail.
+    @Test
+    void evaluateChecklistShortArrayFailsMissingChecks() {
+        String reply = "{\"results\": [{\"index\": 1, \"passed\": true, \"rationale\": \"ok\"}]}";
+        var evaluator = new LlmJudgeEvaluator(stubJudge(reply));
+        var checklist = new EvaluationCriteria.LlmRubricChecklist(
+                java.util.List.of("a", "b", "c"), JUDGE_ID);
+        EvaluationVerdict v = evaluator.evaluate(candidateResult("output"), checklist);
+        assertFalse(v.passed());
+        assertEquals(1.0 / 3.0, v.score(), 1e-9);
+    }
 }

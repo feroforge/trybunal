@@ -11,6 +11,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.trybunal.api.model.GenerationParams;
@@ -36,6 +37,15 @@ public final class OllamaProvider implements ModelProvider {
     public static final String ID = "ollama";
     private static final Logger log = LoggerFactory.getLogger(OllamaProvider.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    /**
+     * Keys in {@link GenerationParams#providerExtras()} that Ollama's {@code /api/chat}
+     * accepts at the <i>top level</i> of the request body rather than nested under
+     * {@code options}. {@code "think"} is the most useful: setting it to {@code false}
+     * tells reasoning models (gemma4, gpt-oss, …) to skip their thinking channel and
+     * write the answer directly, dramatically cutting latency on structured-output cases.
+     */
+    private static final Set<String> TOP_LEVEL_OPTIONS = Set.of("think", "format", "keep_alive");
 
     private final URI baseUri;
     private final HttpClient http;
@@ -76,6 +86,11 @@ public final class OllamaProvider implements ModelProvider {
         body.put("stream", false);
         body.set("messages", encodeMessages(conversation));
         body.set("options", encodeOptions(params));
+        // Hoist Ollama-specific top-level flags (think, format, keep_alive) out of
+        // providerExtras into the request body root.
+        params.providerExtras().forEach((k, v) -> {
+            if (TOP_LEVEL_OPTIONS.contains(k)) body.putPOJO(k, v);
+        });
 
         HttpRequest req;
         String json;
@@ -84,8 +99,13 @@ public final class OllamaProvider implements ModelProvider {
         } catch (Exception e) {
             throw new RuntimeException("failed to encode request", e);
         }
+        // Generous read timeout: with reasoning models (gemma4, phi4-reasoning,
+        // gpt-oss) and a concurrent evaluateAll fan-out, the 12th queued
+        // request can wait behind 11 others on the single-model Ollama
+        // daemon. Five minutes is too tight for that pattern; 20 leaves
+        // room for any single inference + queue depth without false-failing.
         req = HttpRequest.newBuilder(baseUri.resolve("/api/chat"))
-                .timeout(Duration.ofMinutes(5))
+                .timeout(Duration.ofMinutes(20))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(json))
                 .build();
@@ -154,7 +174,11 @@ public final class OllamaProvider implements ModelProvider {
         if (params.maxTokens() != null) opts.put("num_predict", params.maxTokens());
         if (params.topP() != null) opts.put("top_p", params.topP());
         if (params.seed() != null) opts.put("seed", params.seed());
-        params.providerExtras().forEach((k, v) -> opts.putPOJO(k, v));
+        // Top-level keys (think, format, keep_alive) are hoisted to the request body in invoke();
+        // skip them here to avoid duplicate serialization under options.
+        params.providerExtras().forEach((k, v) -> {
+            if (!TOP_LEVEL_OPTIONS.contains(k)) opts.putPOJO(k, v);
+        });
         return opts;
     }
 }

@@ -56,3 +56,12 @@ local.properties
 eval-report.md
 
 tasks
+
+# Per-run retrospectives that live alongside the agentic-eval example —
+# notes about a specific run, not shipped documentation.
+examples/agentic-eval/MODEL-LESSONS.md
+examples/agentic-eval/TUNING-NOTES.md
+examples/agentic-eval/TRYBUNAL-RETROSPECTIVE.md
+
+# Local Claude Code tooling state
+.claude/scheduled_tasks.lock

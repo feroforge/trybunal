@@ -18,6 +18,8 @@ import org.trybunal.api.eval.EvaluationCase;
 import org.trybunal.api.eval.EvaluationCriteria;
 import org.trybunal.api.eval.EvaluationReport;
 import org.trybunal.api.eval.EvaluationVerdict;
+import org.trybunal.api.model.GenerationParams;
+import org.trybunal.api.model.InvocationMetadata;
 import org.trybunal.api.model.InvocationResult;
 import org.trybunal.api.model.Message;
 import org.trybunal.api.model.ModelId;
@@ -96,6 +98,23 @@ public final class Orchestrator implements AutoCloseable {
      * dispatching the call on a virtual thread.
      */
     public InvocationResult chat(PromptSession session, ModelId modelId, String userMessage) {
+        return chat(session, modelId, userMessage, null);
+    }
+
+    /**
+     * Send {@code userMessage} to {@code modelId} within {@code session},
+     * using {@code paramsOverride} when non-null instead of
+     * {@code session.params()}.
+     *
+     * @param session          prompt session; non-null
+     * @param modelId          target model; non-null
+     * @param userMessage      user message; non-null (empty is permitted)
+     * @param paramsOverride   per-call generation params; when non-null,
+     *                         used in place of {@code session.params()}
+     * @return invocation result; never null
+     */
+    public InvocationResult chat(PromptSession session, ModelId modelId, String userMessage,
+                                 GenerationParams paramsOverride) {
         if (session == null) throw new IllegalArgumentException("session required");
         if (modelId == null) throw new IllegalArgumentException("modelId required");
         if (userMessage == null) throw new IllegalArgumentException("userMessage required");
@@ -110,10 +129,11 @@ public final class Orchestrator implements AutoCloseable {
         var conversation = new ArrayList<Message>(session.materialize(modelId));
         conversation.add(new Message.User(userMessage));
         var frozen = List.copyOf(conversation);
+        GenerationParams params = paramsOverride != null ? paramsOverride : session.params();
 
         try {
             return executor.submit(
-                    () -> harness.run(frozen, modelId, session.params())
+                    () -> harness.run(frozen, modelId, params)
             ).get();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -145,7 +165,7 @@ public final class Orchestrator implements AutoCloseable {
     public EvaluationVerdict evaluate(PromptSession session, ModelId modelId, EvaluationCase aCase) {
         log.debug("evaluate case={} criteria={}", aCase.name(), aCase.criteria().getClass().getSimpleName());
         Evaluator evaluator = findEvaluator(aCase.criteria());
-        InvocationResult invocation = chat(session, modelId, aCase.userMessage());
+        InvocationResult invocation = chat(session, modelId, aCase.userMessage(), aCase.paramsOverride());
         return evaluator.evaluate(invocation, aCase.criteria());
     }
 
@@ -153,12 +173,20 @@ public final class Orchestrator implements AutoCloseable {
      * Run all {@code cases} in parallel on the virtual-thread executor, collect
      * results in input order, and return an {@link EvaluationReport}.
      *
+     * <p><b>Per-case tolerance.</b> A transport timeout or provider error on
+     * one case does not abort the whole run. The failure is logged at
+     * {@code WARN} and surfaces as a synthetic {@link EvaluationReport.CaseResult}
+     * with {@code metadata.finishReason="ERROR"} and a {@code passed=false}
+     * verdict whose rationale starts with {@code "Case errored: "}. Callers
+     * that want fail-fast semantics should use {@link #evaluate} per case
+     * and react to thrown exceptions themselves.</p>
+     *
      * @param session  prompt session; non-null
      * @param modelId  target model; non-null
      * @param cases    evaluation cases; non-null
      * @return report containing per-case results in input order; never null
-     * @throws IllegalStateException    if any case has unsupported criteria
-     * @throws RuntimeException         if the executor is interrupted or a case fails
+     * @throws IllegalStateException if any case has unsupported criteria
+     * @throws RuntimeException      if the executor itself is interrupted
      */
     public EvaluationReport evaluateAll(PromptSession session, ModelId modelId, List<EvaluationCase> cases) {
         log.debug("evaluateAll cases={}", cases.size());
@@ -169,16 +197,22 @@ public final class Orchestrator implements AutoCloseable {
             futures.add(executor.submit(() -> runOne(session, modelId, aCase)));
         }
         List<EvaluationReport.CaseResult> results = new ArrayList<>(cases.size());
-        for (Future<EvaluationReport.CaseResult> f : futures) {
+        for (int i = 0; i < futures.size(); i++) {
+            Future<EvaluationReport.CaseResult> f = futures.get(i);
+            EvaluationCase aCase = cases.get(i);
             try {
                 results.add(f.get());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException("evaluateAll interrupted", e);
             } catch (ExecutionException e) {
+                // Per-case tolerance: a transport timeout or provider error
+                // on one case must not lose the other 11 results. Record a
+                // synthetic failure case-result and continue.
                 Throwable c = e.getCause();
-                if (c instanceof RuntimeException re) throw re;
-                throw new RuntimeException("evaluation failed", c);
+                String msg = c == null ? e.getMessage() : c.getMessage();
+                log.warn("case {} failed: {}", aCase.name(), msg);
+                results.add(syntheticFailure(modelId, aCase, msg));
             }
         }
         return new EvaluationReport(startedAt, Duration.ofNanos(System.nanoTime() - startNanos), results);
@@ -186,9 +220,29 @@ public final class Orchestrator implements AutoCloseable {
 
     private EvaluationReport.CaseResult runOne(PromptSession session, ModelId modelId, EvaluationCase aCase) {
         Evaluator evaluator = findEvaluator(aCase.criteria());
-        InvocationResult invocation = chat(session, modelId, aCase.userMessage());
+        InvocationResult invocation = chat(session, modelId, aCase.userMessage(), aCase.paramsOverride());
         EvaluationVerdict verdict = evaluator.evaluate(invocation, aCase.criteria());
         return new EvaluationReport.CaseResult(aCase, invocation, verdict);
+    }
+
+    /**
+     * Builds a {@link EvaluationReport.CaseResult} that surfaces a per-case
+     * provider/transport error without losing the other cases in the run.
+     * The synthetic invocation has empty content and a finish-reason of
+     * {@code "ERROR"}; the verdict carries the error message in its rationale.
+     */
+    private static EvaluationReport.CaseResult syntheticFailure(
+            ModelId modelId, EvaluationCase aCase, String errorMessage) {
+        var meta = new InvocationMetadata(
+                modelId, Instant.now(), Duration.ZERO,
+                null, null, java.util.List.of(), "ERROR");
+        var inv = new InvocationResult(
+                org.trybunal.api.model.Message.Assistant.of(""), meta);
+        var verdict = new EvaluationVerdict(
+                false, 0.0, "orchestrator-error",
+                "Case errored: " + (errorMessage == null ? "(no message)" : errorMessage),
+                java.util.Map.of());
+        return new EvaluationReport.CaseResult(aCase, inv, verdict);
     }
 
     /** Provider ids currently registered. */

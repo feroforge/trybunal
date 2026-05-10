@@ -35,6 +35,15 @@ public final class LlmJudgeEvaluator implements Evaluator {
 
     public static final String ID = "llm-judge";
 
+    /**
+     * System property used to override the per-call {@code maxTokens} budget
+     * given to the judge model. Default {@value #DEFAULT_MAX_TOKENS}. Bump
+     * this when grading reasoning models that consume tokens in a separate
+     * thinking channel before the JSON verdict appears.
+     */
+    public static final String MAX_TOKENS_PROPERTY = "trybunal.judge.maxTokens";
+    public static final int DEFAULT_MAX_TOKENS = 2048;
+
     private static final Logger log = LoggerFactory.getLogger(LlmJudgeEvaluator.class);
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -66,22 +75,34 @@ public final class LlmJudgeEvaluator implements Evaluator {
 
     @Override
     public boolean supports(EvaluationCriteria c) {
-        return c instanceof EvaluationCriteria.LlmRubric;
+        return c instanceof EvaluationCriteria.LlmRubric
+                || c instanceof EvaluationCriteria.LlmRubricChecklist;
     }
 
     /**
      * Evaluates {@code result} against {@code criteria}.
      *
      * @param result   the model output to grade; never null
-     * @param criteria must be {@link EvaluationCriteria.LlmRubric}
+     * @param criteria must be {@link EvaluationCriteria.LlmRubric} or
+     *                 {@link EvaluationCriteria.LlmRubricChecklist}
      * @return a verdict; never null; {@code passed=false} on any failure
-     * @throws IllegalArgumentException if {@code criteria} is not an {@link EvaluationCriteria.LlmRubric}
+     * @throws IllegalArgumentException if {@code criteria} is unsupported
      */
     @Override
     public EvaluationVerdict evaluate(InvocationResult result, EvaluationCriteria criteria) {
-        if (!(criteria instanceof EvaluationCriteria.LlmRubric rubric))
-            throw new IllegalArgumentException("unsupported criteria: " + criteria);
+        // Sealed-exhaustive over EvaluationCriteria's three permits — the
+        // TextMatch arm exists so adding a fourth permit becomes a compile
+        // error here, not an IllegalArgumentException at runtime.
+        return switch (criteria) {
+            case EvaluationCriteria.LlmRubric rubric        -> evaluateRubric(result, rubric);
+            case EvaluationCriteria.LlmRubricChecklist list -> evaluateChecklist(result, list);
+            case EvaluationCriteria.TextMatch tm ->
+                    throw new IllegalArgumentException("unsupported criteria: " + tm);
+        };
+    }
 
+    private EvaluationVerdict evaluateRubric(
+            InvocationResult result, EvaluationCriteria.LlmRubric rubric) {
         ModelProvider judge = resolveProvider(rubric.judgeModel());
         if (judge == null) {
             return new EvaluationVerdict(false, 0.0, ID,
@@ -93,13 +114,36 @@ public final class LlmJudgeEvaluator implements Evaluator {
         InvocationResult judged;
         try {
             judged = judge.invoke(conversation, rubric.judgeModel(),
-                    new GenerationParams(0.0, 512, null, null, Map.of()));
+                    new GenerationParams(0.0, judgeMaxTokens(), null, null, Map.of()));
         } catch (RuntimeException e) {
             log.warn("judge invocation failed: {}", e.toString());
             return new EvaluationVerdict(false, 0.0, ID,
                     "Judge invocation failed: " + e.getMessage(), Map.of());
         }
         return parseVerdict(judged.reply().content());
+    }
+
+    private EvaluationVerdict evaluateChecklist(
+            InvocationResult result, EvaluationCriteria.LlmRubricChecklist list) {
+        ModelProvider judge = resolveProvider(list.judgeModel());
+        if (judge == null) {
+            return new EvaluationVerdict(false, 0.0, ID,
+                    "No ModelProvider registered for judge id=" + list.judgeModel().provider(),
+                    Map.of());
+        }
+
+        var conversation = JudgePromptTemplate.renderChecklist(
+                list.checks(), result.reply().content());
+        InvocationResult judged;
+        try {
+            judged = judge.invoke(conversation, list.judgeModel(),
+                    new GenerationParams(0.0, judgeMaxTokens(), null, null, Map.of()));
+        } catch (RuntimeException e) {
+            log.warn("judge invocation failed: {}", e.toString());
+            return new EvaluationVerdict(false, 0.0, ID,
+                    "Judge invocation failed: " + e.getMessage(), Map.of());
+        }
+        return parseChecklistVerdict(list.checks(), judged.reply().content());
     }
 
     private ModelProvider resolveProvider(ModelId judgeModel) {
@@ -136,7 +180,84 @@ public final class LlmJudgeEvaluator implements Evaluator {
         }
     }
 
+    /**
+     * Parses a checklist verdict. Pass requires every check to be true. Score
+     * is {@code passing / total} so partial-pass cases still surface signal.
+     * The full per-check breakdown is stashed in {@code details["checks"]}
+     * for downstream renderers.
+     */
+    private static EvaluationVerdict parseChecklistVerdict(java.util.List<String> checks, String raw) {
+        String json = JudgePromptTemplate.extractJsonBlock(raw);
+        if (json == null) {
+            return new EvaluationVerdict(false, 0.0, ID,
+                    "Judge returned no JSON block. Raw: " + truncate(raw, 300),
+                    Map.of("raw", raw));
+        }
+        try {
+            JsonNode root = JSON.readTree(json);
+            JsonNode results = root.path("results");
+            if (!results.isArray() || results.isEmpty()) {
+                return new EvaluationVerdict(false, 0.0, ID,
+                        "Judge JSON missing non-empty 'results' array",
+                        Map.of("raw", raw));
+            }
+            int total = checks.size();
+            int passing = 0;
+            var perCheck = new java.util.ArrayList<Map<String, Object>>(total);
+            // Iterate the model's results; clamp to expected count.
+            for (int i = 0; i < Math.min(results.size(), total); i++) {
+                JsonNode r = results.get(i);
+                boolean p = r.path("passed").asBoolean(false);
+                String rationale = r.path("rationale").asText();
+                if (p) passing++;
+                perCheck.add(Map.of(
+                        "index", i + 1,
+                        "check", checks.get(i),
+                        "passed", p,
+                        "rationale", rationale.isEmpty() ? "(no rationale)" : rationale));
+            }
+            // Treat any short array as failure on the missing checks.
+            for (int i = results.size(); i < total; i++) {
+                perCheck.add(Map.of(
+                        "index", i + 1,
+                        "check", checks.get(i),
+                        "passed", false,
+                        "rationale", "Judge omitted this check"));
+            }
+            boolean allPassed = passing == total;
+            double score = total == 0 ? 0.0 : (double) passing / total;
+            String summary = allPassed
+                    ? "All " + total + " checks passed."
+                    : passing + " / " + total + " checks passed.";
+            return new EvaluationVerdict(allPassed, score, ID, summary,
+                    Map.of("raw", raw, "checks", perCheck));
+        } catch (Exception e) {
+            return new EvaluationVerdict(false, 0.0, ID,
+                    "Failed to parse judge JSON: " + e.getMessage(),
+                    Map.of("raw", raw));
+        }
+    }
+
     private static String truncate(String s, int n) {
         return s.length() <= n ? s : s.substring(0, n) + "…";
+    }
+
+    /**
+     * Resolves the judge call's {@code maxTokens} from
+     * {@link #MAX_TOKENS_PROPERTY}, falling back to {@link #DEFAULT_MAX_TOKENS}
+     * when unset or unparseable. Read on every call so reasoning models can
+     * be given more headroom without restarting the JVM.
+     */
+    private static int judgeMaxTokens() {
+        String raw = System.getProperty(MAX_TOKENS_PROPERTY);
+        if (raw == null || raw.isBlank()) return DEFAULT_MAX_TOKENS;
+        try {
+            int v = Integer.parseInt(raw.trim());
+            return v > 0 ? v : DEFAULT_MAX_TOKENS;
+        } catch (NumberFormatException e) {
+            log.warn("invalid {} value: {}; falling back to default {}",
+                    MAX_TOKENS_PROPERTY, raw, DEFAULT_MAX_TOKENS);
+            return DEFAULT_MAX_TOKENS;
+        }
     }
 }

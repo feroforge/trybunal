@@ -12,5 +12,6 @@ include(
     "trybunal-evaluator-assertions",
     "trybunal-evaluator-llm-judge",
     "examples:hello",
-    "examples:eval-demo"
+    "examples:eval-demo",
+    "examples:agentic-eval"
 )
