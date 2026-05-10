@@ -21,7 +21,9 @@
       "Bash(./gradlew :examples:agentic-eval:build)",
       "Bash(./gradlew :trybunal-core:build)",
       "Bash(./gradlew :trybunal-tool-web-search:build)",
-      "Bash(./gradlew :trybunal-tool-web-fetch:build)"
+      "Bash(./gradlew :trybunal-tool-web-fetch:build)",
+      "Bash(./gradlew :trybunal-tool-safe-download:build)",
+      "Bash(./gradlew :trybunal-tool-safe-download:test)"
     ]
   }
 }
