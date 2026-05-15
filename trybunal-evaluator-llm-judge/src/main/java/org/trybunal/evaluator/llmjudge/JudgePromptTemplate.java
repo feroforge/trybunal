@@ -1,6 +1,10 @@
 package org.trybunal.evaluator.llmjudge;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.trybunal.api.model.Message;
 
 /**
@@ -29,6 +33,17 @@ public final class JudgePromptTemplate {
             {"results": [{"index": <int>, "passed": <true|false>, "rationale": "<one sentence>"}, ...]}
             Include exactly one result object per check, in the same order.
             """;
+
+    private static final ObjectMapper PARSER = new ObjectMapper();
+
+    private static final Pattern THINK_BLOCK =
+            Pattern.compile("(?is)<think\\b[^>]*>.*?</think\\s*>");
+
+    private static final Pattern FENCE_JSON =
+            Pattern.compile("(?is)```\\s*json\\s*\\R?(.*?)```");
+
+    private static final Pattern FENCE_PLAIN =
+            Pattern.compile("(?is)```\\s*\\R?(.*?)```");
 
     /**
      * Builds the two-message conversation to send to the judge.
@@ -62,76 +77,133 @@ public final class JudgePromptTemplate {
     }
 
     /**
-     * Returns the first balanced {@code {...}} JSON object substring found in {@code raw},
-     * or {@code null} if none exists.
+     * Extracts a JSON document from a judge model's raw reply, tolerating the
+     * many shapes models actually emit. The first candidate that parses as
+     * valid JSON wins; precedence is:
      *
-     * <p>Handles nested braces and braces inside JSON string literals (including escaped
-     * quotes), so prose-wrapped or markdown-fenced judge replies are tolerated. Reasoning
-     * channels of the form {@code <think>...</think>} (and the unclosed-but-token-limited
-     * {@code <think>...} with no closing tag) are stripped <i>before</i> extraction so JSON
-     * the judge sketches inside its scratchpad doesn't get parsed as the verdict.</p>
+     * <ol>
+     *   <li>Trimmed input is itself a JSON document.</li>
+     *   <li>After stripping {@code <think>...</think>} blocks, the trimmed
+     *       remainder is itself a JSON document.</li>
+     *   <li>A fenced {@code ```json ... ```} block.</li>
+     *   <li>An unlabelled fenced {@code ``` ... ```} block whose payload
+     *       starts with {@code {} or {@code [}.</li>
+     *   <li>The last balanced {@code {...}} or {@code [...]} substring whose
+     *       opening token is preceded by whitespace (or start of input).</li>
+     * </ol>
      *
      * @param raw raw string from the judge model; may be null
-     * @return extracted JSON substring, or null
+     * @return extracted JSON substring, or null if none of the strategies match
      */
     public static String extractJsonBlock(String raw) {
         if (raw == null) return null;
-        String cleaned = stripReasoningChannels(raw);
-        int start = cleaned.indexOf('{');
-        if (start < 0) return null;
-        int depth = 0;
-        boolean inString = false;
-        boolean escaped = false;
-        for (int i = start; i < cleaned.length(); i++) {
-            char c = cleaned.charAt(i);
-            if (escaped) { escaped = false; continue; }
-            if (c == '\\') { escaped = true; continue; }
-            if (c == '"') inString = !inString;
-            if (inString) continue;
-            if (c == '{') depth++;
-            else if (c == '}') {
-                depth--;
-                if (depth == 0) return cleaned.substring(start, i + 1);
-            }
+
+        String trimmed = raw.strip();
+        if (trimmed.isEmpty()) return null;
+
+        if (startsWithJsonOpener(trimmed) && parses(trimmed)) {
+            return trimmed;
         }
+
+        String stripped = THINK_BLOCK.matcher(raw).replaceAll("");
+        String strippedTrimmed = stripped.strip();
+        if (!strippedTrimmed.isEmpty()
+                && startsWithJsonOpener(strippedTrimmed)
+                && parses(strippedTrimmed)) {
+            return strippedTrimmed;
+        }
+
+        Matcher mJson = FENCE_JSON.matcher(stripped);
+        while (mJson.find()) {
+            String inner = mJson.group(1).strip();
+            if (parses(inner)) return inner;
+        }
+
+        Matcher mPlain = FENCE_PLAIN.matcher(stripped);
+        while (mPlain.find()) {
+            String inner = mPlain.group(1).strip();
+            if (startsWithJsonOpener(inner) && parses(inner)) return inner;
+        }
+
+        String last = findLastBalancedJson(stripped);
+        if (last != null) return last;
+
         return null;
     }
 
-    /**
-     * Removes reasoning-channel markup so a judge's scratch JSON inside a
-     * {@code <think>} block is not mistaken for the verdict.
-     *
-     * <p>Handles three shapes:</p>
-     * <ul>
-     *   <li>Closed: {@code <think>...stuff...</think>tail} → {@code tail}.</li>
-     *   <li>Multiple closed blocks: each removed.</li>
-     *   <li>Unclosed (judge token-starved mid-thought): {@code <think>only thinking}
-     *       → empty string. Caller surfaces the resulting "no JSON block" rationale.</li>
-     * </ul>
-     *
-     * <p>Tag matching is case-insensitive and tolerant of whitespace.</p>
-     */
-    static String stripReasoningChannels(String raw) {
-        if (raw == null || raw.isEmpty()) return raw;
-        String s = raw;
-        // Remove all closed <think>...</think> blocks (non-greedy, dot-matches-newline).
-        s = s.replaceAll("(?is)<think\\b[^>]*>.*?</think\\s*>", "");
-        // Strip a trailing unclosed <think>... with no matching close tag.
-        int openIdx = indexOfIgnoreCase(s, "<think");
-        if (openIdx >= 0 && indexOfIgnoreCase(s, "</think", openIdx) < 0) {
-            s = s.substring(0, openIdx);
+    private static boolean startsWithJsonOpener(String s) {
+        if (s.isEmpty()) return false;
+        char c = s.charAt(0);
+        return c == '{' || c == '[';
+    }
+
+    private static boolean parses(String s) {
+        if (s == null || s.isEmpty()) return false;
+        try {
+            PARSER.readTree(s);
+            return true;
+        } catch (JsonProcessingException e) {
+            return false;
         }
-        return s;
     }
 
-    private static int indexOfIgnoreCase(String haystack, String needle) {
-        return indexOfIgnoreCase(haystack, needle, 0);
+    /**
+     * Walks {@code s} left-to-right collecting every balanced top-level
+     * {@code {...}} or {@code [...]} substring whose opening token sits at the
+     * start of input or is preceded by a whitespace character. Returns the
+     * rightmost such substring that parses as JSON, or null.
+     *
+     * <p>The walker is string-literal aware so braces inside JSON string
+     * values do not perturb the depth counter.</p>
+     */
+    private static String findLastBalancedJson(String s) {
+        String lastValid = null;
+        int n = s.length();
+        int i = 0;
+        while (i < n) {
+            char c = s.charAt(i);
+            if ((c == '{' || c == '[') && precededByWhitespace(s, i)) {
+                int end = scanBalanced(s, i);
+                if (end > i) {
+                    String candidate = s.substring(i, end + 1);
+                    if (parses(candidate)) {
+                        lastValid = candidate;
+                    }
+                    i = end + 1;
+                    continue;
+                }
+            }
+            i++;
+        }
+        return lastValid;
     }
 
-    private static int indexOfIgnoreCase(String haystack, String needle, int from) {
-        int n = haystack.length(), m = needle.length();
-        for (int i = from; i + m <= n; i++) {
-            if (haystack.regionMatches(true, i, needle, 0, m)) return i;
+    private static boolean precededByWhitespace(String s, int idx) {
+        if (idx == 0) return true;
+        return Character.isWhitespace(s.charAt(idx - 1));
+    }
+
+    /**
+     * Given an opening {@code {} or {@code [} at {@code start}, returns the
+     * index of its matching close, or -1 if unbalanced. String-literal aware.
+     */
+    private static int scanBalanced(String s, int start) {
+        char open = s.charAt(start);
+        char close = (open == '{') ? '}' : ']';
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = start; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (escaped) { escaped = false; continue; }
+            if (c == '\\') { escaped = true; continue; }
+            if (c == '"') { inString = !inString; continue; }
+            if (inString) continue;
+            if (c == open) depth++;
+            else if (c == close) {
+                depth--;
+                if (depth == 0) return i;
+            }
         }
         return -1;
     }

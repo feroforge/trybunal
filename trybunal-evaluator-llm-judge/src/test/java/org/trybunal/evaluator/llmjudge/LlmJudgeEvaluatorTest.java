@@ -129,9 +129,11 @@ class LlmJudgeEvaluatorTest {
     }
 
     @Test
-    void extractJsonBlockExtractsFirstBlock() {
+    void extractJsonBlockExtractsLastBlockWhenMultiple() {
+        // When multiple balanced JSON blocks are present, the trailing one is the
+        // verdict (judges sometimes echo earlier-draft JSON in prose before the final answer).
         String input = "some prose {\"passed\": false} more text {\"other\": 1}";
-        assertEquals("{\"passed\": false}", JudgePromptTemplate.extractJsonBlock(input));
+        assertEquals("{\"other\": 1}", JudgePromptTemplate.extractJsonBlock(input));
     }
 
     @Test
