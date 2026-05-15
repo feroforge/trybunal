@@ -55,21 +55,29 @@ class WebSearchToolProviderSelectionTest {
     }
 
     @Test
-    void defaultsToBraveWhenBraveAndTavilyAvailable() {
+    void defaultsToDuckDuckGoEvenWhenBraveAndTavilyAvailable() {
         WebSearchTool tool = new WebSearchTool(providers(true, true, false), null);
-        assertEquals("brave", runAndExtractProvider(tool));
+        assertEquals("duckduckgo", runAndExtractProvider(tool));
     }
 
     @Test
-    void defaultsToTavilyWhenOnlyTavilyAvailable() {
+    void defaultsToDuckDuckGoWhenOnlyTavilyAvailable() {
         WebSearchTool tool = new WebSearchTool(providers(false, true, false), null);
-        assertEquals("tavily", runAndExtractProvider(tool));
+        assertEquals("duckduckgo", runAndExtractProvider(tool));
     }
 
     @Test
     void defaultsToDuckDuckGoWhenNothingConfigured() {
         WebSearchTool tool = new WebSearchTool(providers(false, false, false), null);
         assertEquals("duckduckgo", runAndExtractProvider(tool));
+    }
+
+    @Test
+    void perCallProviderArgumentOverridesDefault() {
+        WebSearchTool tool = new WebSearchTool(providers(true, false, false), null);
+        ToolResult r = tool.invoke(Map.of("query", "hi", "provider", "brave"));
+        assertFalse(r.isError(), "Expected ok, got: " + r.content());
+        assertTrue(r.content().contains("(provider: brave)"), r.content());
     }
 
     @Test

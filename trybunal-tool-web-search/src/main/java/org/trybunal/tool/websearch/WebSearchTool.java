@@ -32,7 +32,7 @@ public final class WebSearchTool implements Tool {
 
     private static final String SYS_PROP = "trybunal.web_search.provider";
     private static final String ENV_VAR = "TRYBUNAL_WEB_SEARCH_PROVIDER";
-    private static final List<String> PRIORITY = List.of("brave", "tavily", "serper", "duckduckgo");
+    private static final String DEFAULT_PROVIDER = "duckduckgo";
 
     private static final ToolSpec SPEC = new ToolSpec(
             "web_search",
@@ -72,6 +72,8 @@ public final class WebSearchTool implements Tool {
     }
 
     private static String resolveDefault(List<SearchProvider> providers) {
+        // DuckDuckGo is the default. The system property, env var, or per-call
+        // `provider` argument can override it to pick a different engine.
         String fromProp = System.getProperty(SYS_PROP);
         if (fromProp != null && !fromProp.isBlank()) {
             return fromProp.strip();
@@ -80,18 +82,7 @@ public final class WebSearchTool implements Tool {
         if (fromEnv != null && !fromEnv.isBlank()) {
             return fromEnv.strip();
         }
-        for (String id : PRIORITY) {
-            for (SearchProvider p : providers) {
-                if (p.id().equals(id) && p.isAvailable()) {
-                    return id;
-                }
-            }
-        }
-        // Tail fallback: any available provider, else first one.
-        for (SearchProvider p : providers) {
-            if (p.isAvailable()) return p.id();
-        }
-        return providers.isEmpty() ? "duckduckgo" : providers.get(0).id();
+        return DEFAULT_PROVIDER;
     }
 
     @Override
