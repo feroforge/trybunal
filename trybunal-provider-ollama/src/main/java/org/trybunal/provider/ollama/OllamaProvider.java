@@ -168,12 +168,22 @@ public final class OllamaProvider implements ModelProvider {
                 : Duration.ZERO;
 
         List<ToolCall> toolCalls = decodeToolCalls(message);
+        String toolCallOrigin = toolCalls.isEmpty() ? null : "structured";
+        if (toolCalls.isEmpty() && !content.isBlank()) {
+            var fallback = ToolCallTextParser.parse(content);
+            if (!fallback.calls().isEmpty()) {
+                toolCalls = fallback.calls();
+                toolCallOrigin = detectTextOrigin(content);
+                content = stripParsedPrefix(content, fallback.remainingContent());
+            }
+        }
 
         Map<String, Object> extras = Map.of();
-        if (!thinking.isBlank()) {
+        if (!thinking.isBlank() || toolCallOrigin != null) {
             // LinkedHashMap so future extras retain insertion order in logs/snapshots.
             Map<String, Object> m = new LinkedHashMap<>();
-            m.put("thinking", thinking);
+            if (!thinking.isBlank()) m.put("thinking", thinking);
+            if (toolCallOrigin != null) m.put("tool_call_origin", toolCallOrigin);
             extras = m;
         }
 
@@ -231,6 +241,39 @@ public final class OllamaProvider implements ModelProvider {
             arr.add(entry);
         }
         return arr;
+    }
+
+    /**
+     * Identifies which text-channel marker started {@code content}. Used to
+     * stamp {@code providerExtras["tool_call_origin"]} when the text fallback
+     * extracts calls. Assumes a marker is present at the first non-blank
+     * character — the fallback is only invoked once that is established.
+     */
+    private static String detectTextOrigin(String content) {
+        int i = 0;
+        while (i < content.length() && Character.isWhitespace(content.charAt(i))) i++;
+        String tail = content.substring(i);
+        if (tail.startsWith("<|python_tag|>")) return "text:python_tag";
+        if (tail.startsWith("[TOOL_CALLS]")) {
+            int j = i + "[TOOL_CALLS]".length();
+            while (j < content.length() && Character.isWhitespace(content.charAt(j))) j++;
+            if (j < content.length() && content.charAt(j) == '[') return "text:tool_calls_json";
+            return "text:tool_calls";
+        }
+        return "text:unknown";
+    }
+
+    /**
+     * Returns the trimmed remaining content from a successful parse. The
+     * parser hands us the substring left over after the marker + parsed
+     * calls; this strips a leading newline / whitespace so downstream
+     * renderers don't show a blank line where the tool-call text used to be.
+     */
+    private static String stripParsedPrefix(String original, String remaining) {
+        if (remaining == null || remaining.isEmpty()) return "";
+        int i = 0;
+        while (i < remaining.length() && Character.isWhitespace(remaining.charAt(i))) i++;
+        return remaining.substring(i);
     }
 
     static List<ToolCall> decodeToolCalls(JsonNode message) {

@@ -18,5 +18,6 @@ include(
     "trybunal-tool-citations",
     "examples:hello",
     "examples:eval-demo",
-    "examples:agentic-eval"
+    "examples:agentic-eval",
+    "examples:probe-tool-format"
 )
