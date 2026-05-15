@@ -42,14 +42,28 @@ import org.trybunal.api.spi.Tool;
 public final class Orchestrator implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(Orchestrator.class);
-    private static final int MAX_TOOL_ITERATIONS = 8;
+
+    /** Default ReAct iteration cap when none is supplied and the system property is unset. */
+    public static final int DEFAULT_MAX_TOOL_ITERATIONS = 8;
+
+    /** System property to override {@link #DEFAULT_MAX_TOOL_ITERATIONS}. */
+    public static final String MAX_ITER_PROPERTY = "trybunal.maxToolIterations";
 
     private final Map<String, ModelHarness> harnesses;
     private final List<Evaluator> evaluators;
     private final List<Tool> tools;
     private final ExecutorService executor;
+    private final int maxToolIterations;
 
     private Orchestrator(List<ModelProvider> providers, List<Evaluator> evaluators, List<Tool> tools) {
+        this(providers, evaluators, tools, resolveDefaultCap());
+    }
+
+    private Orchestrator(List<ModelProvider> providers, List<Evaluator> evaluators, List<Tool> tools,
+                         int maxToolIterations) {
+        if (maxToolIterations < 1) {
+            throw new IllegalArgumentException("maxToolIterations must be >= 1");
+        }
         var seenNames = new java.util.HashSet<String>();
         for (Tool t : tools) {
             if (!seenNames.add(t.spec().name())) {
@@ -58,6 +72,7 @@ public final class Orchestrator implements AutoCloseable {
         }
         this.tools = List.copyOf(tools);
         this.evaluators = List.copyOf(evaluators);
+        this.maxToolIterations = maxToolIterations;
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
 
         var byId = new HashMap<String, ModelHarness>();
@@ -65,13 +80,39 @@ public final class Orchestrator implements AutoCloseable {
             Objects.requireNonNull(p.id(), "provider id");
             ModelHarness base = new DefaultModelHarness(p);
             byId.put(p.id(), this.tools.isEmpty() ? base :
-                    new ToolCallingHarness(base, this.tools, MAX_TOOL_ITERATIONS, this.executor));
+                    new ToolCallingHarness(base, this.tools, this.maxToolIterations, this.executor));
         }
         this.harnesses = Map.copyOf(byId);
     }
 
+    private static int resolveDefaultCap() {
+        String prop = System.getProperty(MAX_ITER_PROPERTY);
+        if (prop == null || prop.isBlank()) return DEFAULT_MAX_TOOL_ITERATIONS;
+        try {
+            int v = Integer.parseInt(prop.trim());
+            if (v < 1) throw new NumberFormatException();
+            return v;
+        } catch (NumberFormatException e) {
+            log.warn("ignoring invalid {}={} — falling back to {}",
+                    MAX_ITER_PROPERTY, prop, DEFAULT_MAX_TOOL_ITERATIONS);
+            return DEFAULT_MAX_TOOL_ITERATIONS;
+        }
+    }
+
     /** Discovers all registered {@link ModelProvider}s, {@link Evaluator}s, and {@link Tool}s via {@link ServiceLoader}. */
     public static Orchestrator autoDiscover() {
+        return autoDiscoverWithCap(resolveDefaultCap());
+    }
+
+    /**
+     * Like {@link #autoDiscover()} but with an explicit tool-iteration cap.
+     * Ignores the {@link #MAX_ITER_PROPERTY} system property.
+     */
+    public static Orchestrator autoDiscover(int maxToolIterations) {
+        return autoDiscoverWithCap(maxToolIterations);
+    }
+
+    private static Orchestrator autoDiscoverWithCap(int maxToolIterations) {
         var providers = new ArrayList<ModelProvider>();
         for (ModelProvider p : ServiceLoader.load(ModelProvider.class)) {
             log.info("registered provider id={} class={}", p.id(), p.getClass().getName());
@@ -90,7 +131,7 @@ public final class Orchestrator implements AutoCloseable {
             log.info("registered tool name={} class={}", t.spec().name(), t.getClass().getName());
             tools.add(t);
         }
-        return new Orchestrator(providers, evs, tools);
+        return new Orchestrator(providers, evs, tools, maxToolIterations);
     }
 
     /** Builds an orchestrator from an explicit provider list (test-friendly). */
@@ -119,6 +160,27 @@ public final class Orchestrator implements AutoCloseable {
     public static Orchestrator of(List<ModelProvider> providers, List<Evaluator> evaluators,
                                   List<Tool> tools) {
         return new Orchestrator(providers, evaluators, tools);
+    }
+
+    /**
+     * Like {@link #of(List, List, List)} but with an explicit tool-iteration cap.
+     * Ignores the {@link #MAX_ITER_PROPERTY} system property.
+     *
+     * @param providers          model providers; defensively copied
+     * @param evaluators         evaluators; defensively copied
+     * @param tools              tools to register; names must be unique; defensively copied
+     * @param maxToolIterations  ReAct cap; must be &gt;= 1
+     * @throws IllegalStateException    if two tools share the same name
+     * @throws IllegalArgumentException if {@code maxToolIterations < 1}
+     */
+    public static Orchestrator of(List<ModelProvider> providers, List<Evaluator> evaluators,
+                                  List<Tool> tools, int maxToolIterations) {
+        return new Orchestrator(providers, evaluators, tools, maxToolIterations);
+    }
+
+    /** The current ReAct iteration cap. */
+    public int maxToolIterations() {
+        return maxToolIterations;
     }
 
     /**
