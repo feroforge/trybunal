@@ -19,5 +19,6 @@ include(
     "examples:hello",
     "examples:eval-demo",
     "examples:agentic-eval",
-    "examples:probe-tool-format"
+    "examples:probe-tool-format",
+    "examples:research-agent"
 )

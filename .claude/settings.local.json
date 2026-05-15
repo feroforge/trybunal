@@ -24,7 +24,10 @@
       "Bash(./gradlew :trybunal-tool-web-fetch:build)",
       "Bash(./gradlew :trybunal-tool-safe-download:build)",
       "Bash(./gradlew :trybunal-tool-safe-download:test)",
-      "Bash(./gradlew :trybunal-tool-citations:build)"
+      "Bash(./gradlew :trybunal-tool-citations:build)",
+      "Bash(./gradlew :examples:research-agent:build)",
+      "Bash(./gradlew :examples:research-agent:compileJava)",
+      "Bash(./gradlew :trybunal-core:test --tests OrchestratorMaxIterationsTest)"
     ]
   }
 }
