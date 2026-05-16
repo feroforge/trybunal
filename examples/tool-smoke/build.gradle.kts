@@ -10,6 +10,7 @@ dependencies {
     implementation(project(":trybunal-tool-browser-playwright"))
     implementation(project(":trybunal-tool-safe-download"))
     implementation(project(":trybunal-tool-citations"))
+    implementation(project(":trybunal-tool-mocks"))
     runtimeOnly(project(":trybunal-provider-ollama"))
     runtimeOnly("org.slf4j:slf4j-simple:2.0.13")
 }

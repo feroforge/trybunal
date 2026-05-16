@@ -18,6 +18,12 @@ import org.trybunal.core.Orchestrator;
 import org.trybunal.tool.browser.BrowserTool;
 import org.trybunal.tool.citations.CiteTool;
 import org.trybunal.tool.download.SafeDownloadTool;
+import org.trybunal.tool.mocks.MockCiteTool;
+import org.trybunal.tool.mocks.MockSafeDownloadTool;
+import org.trybunal.tool.mocks.MockTools;
+import org.trybunal.tool.mocks.MockWebBrowserTool;
+import org.trybunal.tool.mocks.MockWebFetchTool;
+import org.trybunal.tool.mocks.MockWebSearchTool;
 import org.trybunal.tool.webfetch.WebFetchTool;
 import org.trybunal.tool.websearch.WebSearchTool;
 
@@ -59,12 +65,13 @@ public final class AllTools {
             return;
         }
 
+        boolean useMocks = MockTools.enabled();
         List<RetryingCountingTool> wrapped = List.of(
-                new RetryingCountingTool(new WebSearchTool(),    retries, retryDelay),
-                new RetryingCountingTool(new WebFetchTool(),     retries, retryDelay),
-                new RetryingCountingTool(new BrowserTool(),      retries, retryDelay),
-                new RetryingCountingTool(new SafeDownloadTool(), retries, retryDelay),
-                new RetryingCountingTool(new CiteTool(),         retries, retryDelay)
+                new RetryingCountingTool(useMocks ? new MockWebSearchTool()    : new WebSearchTool(),    retries, retryDelay),
+                new RetryingCountingTool(useMocks ? new MockWebFetchTool()     : new WebFetchTool(),     retries, retryDelay),
+                new RetryingCountingTool(useMocks ? new MockWebBrowserTool()   : new BrowserTool(),      retries, retryDelay),
+                new RetryingCountingTool(useMocks ? new MockSafeDownloadTool() : new SafeDownloadTool(), retries, retryDelay),
+                new RetryingCountingTool(useMocks ? new MockCiteTool()         : new CiteTool(),         retries, retryDelay)
         );
         List<Tool> tools = new ArrayList<>(wrapped);
 
@@ -110,8 +117,8 @@ public final class AllTools {
         String user = "Build the citation record described in the system prompt. "
                 + "Use every tool exactly once, in the order listed.";
 
-        System.out.printf("model=%s thinking=%s maxTokens=%d maxIter=%d retries=%d%n",
-                modelName, thinking, maxTokens, maxIter, retries);
+        System.out.printf("model=%s thinking=%s maxTokens=%d maxIter=%d retries=%d mocks=%s%n",
+                modelName, thinking, maxTokens, maxIter, retries, useMocks);
         System.out.println("=".repeat(76));
 
         long t0 = System.currentTimeMillis();

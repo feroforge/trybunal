@@ -21,6 +21,7 @@ import org.trybunal.core.Orchestrator;
 import org.trybunal.examples.thesis.ThesisModelTuning;
 import org.trybunal.tool.citations.CitationReport;
 import org.trybunal.tool.citations.CitationStore;
+import org.trybunal.tool.mocks.MockTools;
 
 /**
  * End-to-end demo wiring every Phase 3 tool together: a ReAct loop with
@@ -91,9 +92,22 @@ public final class ResearchAgent {
         // tool order in some prompt formats.
         Tool todo = new TodoTool();
         tools.add(trace ? new TracingTool(todo) : todo);
-        for (Tool t : ServiceLoader.load(Tool.class)) {
-            if (skipSet.contains(t.spec().name())) continue;
-            tools.add(trace ? new TracingTool(t) : t);
+        if (MockTools.enabled()) {
+            // Mocks are opt-in only — never auto-discovered. We additionally
+            // wrap each mock in a CitationCollectingTool so any citations
+            // returned by mock tools land in the shared CitationStore, which
+            // is what CitationReport renders into the bibliography section.
+            System.out.println("Mock tools active via -Dtrybunal.useMocks=true");
+            for (Tool m : MockTools.all()) {
+                if (skipSet.contains(m.spec().name())) continue;
+                Tool collecting = new CitationCollectingTool(m, CitationStore.shared());
+                tools.add(trace ? new TracingTool(collecting) : collecting);
+            }
+        } else {
+            for (Tool t : ServiceLoader.load(Tool.class)) {
+                if (skipSet.contains(t.spec().name())) continue;
+                tools.add(trace ? new TracingTool(t) : t);
+            }
         }
         if (!skipSet.isEmpty()) {
             System.out.println("Tools skipped via -Dtrybunal.skipTools: " + skipSet);
@@ -125,6 +139,29 @@ public final class ResearchAgent {
             Files.writeString(out, md);
             System.out.println("Wrote " + out.toAbsolutePath());
             System.out.println("Tools registered: " + orch.registeredTools());
+        }
+    }
+
+    /**
+     * Decorator that forwards every {@link ToolResult#citations()} produced
+     * by the delegate into the supplied {@link CitationStore}. Mock tools
+     * cannot depend on {@code trybunal-tool-citations}, so the wiring lives
+     * here — at the example edge — where the shared store is reachable.
+     */
+    private static final class CitationCollectingTool implements Tool {
+        private final Tool delegate;
+        private final CitationStore store;
+        CitationCollectingTool(Tool delegate, CitationStore store) {
+            this.delegate = delegate;
+            this.store = store;
+        }
+        @Override public ToolSpec spec() { return delegate.spec(); }
+        @Override public ToolResult invoke(Map<String, Object> arguments) {
+            ToolResult r = delegate.invoke(arguments);
+            if (!r.isError()) {
+                for (var c : r.citations()) store.add(c);
+            }
+            return r;
         }
     }
 

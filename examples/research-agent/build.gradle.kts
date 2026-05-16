@@ -5,6 +5,7 @@ plugins {
 dependencies {
     implementation(project(":trybunal-core"))
     implementation(project(":trybunal-tool-citations"))
+    implementation(project(":trybunal-tool-mocks"))
     implementation(project(":trybunal-evaluator-llm-judge"))
     runtimeOnly(project(":trybunal-provider-ollama"))
     runtimeOnly(project(":trybunal-evaluator-assertions"))

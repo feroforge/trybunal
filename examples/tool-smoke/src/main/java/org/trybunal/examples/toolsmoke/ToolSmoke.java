@@ -19,6 +19,12 @@ import org.trybunal.core.Orchestrator;
 import org.trybunal.tool.browser.BrowserTool;
 import org.trybunal.tool.citations.CiteTool;
 import org.trybunal.tool.download.SafeDownloadTool;
+import org.trybunal.tool.mocks.MockCiteTool;
+import org.trybunal.tool.mocks.MockSafeDownloadTool;
+import org.trybunal.tool.mocks.MockTools;
+import org.trybunal.tool.mocks.MockWebBrowserTool;
+import org.trybunal.tool.mocks.MockWebFetchTool;
+import org.trybunal.tool.mocks.MockWebSearchTool;
 import org.trybunal.tool.webfetch.WebFetchTool;
 import org.trybunal.tool.websearch.WebSearchTool;
 
@@ -62,8 +68,8 @@ public final class ToolSmoke {
                 ? List.of("web_search", "web_fetch", "web_browser", "safe_download", "cite")
                 : List.of(toolName.toLowerCase(Locale.ROOT));
 
-        System.out.printf("model=%s thinking=%s maxTokens=%d maxIter=%d%n",
-                modelName, thinking, maxTokens, maxIter);
+        System.out.printf("model=%s thinking=%s maxTokens=%d maxIter=%d mocks=%s%n",
+                modelName, thinking, maxTokens, maxIter, MockTools.enabled());
         System.out.println("=".repeat(72));
 
         for (String t : requested) {
@@ -162,6 +168,7 @@ public final class ToolSmoke {
     private record Scenario(String systemPrompt, String userPrompt, Tool tool) {}
 
     private static Scenario scenarioFor(String name) {
+        boolean mocks = MockTools.enabled();
         return switch (name) {
             case "web_search" -> new Scenario(
                     "You are a research assistant with access to a single tool, web_search. "
@@ -170,20 +177,20 @@ public final class ToolSmoke {
                             + "summarise the results.",
                     "What were the top search results today for \"Apple Q2 2026 earnings transcript\"? "
                             + "Use web_search to find them.",
-                    new WebSearchTool());
+                    mocks ? new MockWebSearchTool() : new WebSearchTool());
             case "web_fetch" -> new Scenario(
                     "You are a research assistant with access to a single tool, web_fetch. "
                             + "It downloads the text of a URL. Call it exactly once on the URL "
                             + "the user provides, then briefly summarise the page.",
                     "Fetch https://example.com and tell me what's on the page.",
-                    new WebFetchTool());
+                    mocks ? new MockWebFetchTool() : new WebFetchTool());
             case "web_browser" -> new Scenario(
                     "You are a research assistant with access to a single tool, web_browser. "
                             + "It renders a URL in a headless browser and returns the rendered "
                             + "text. Call it exactly once on the URL the user provides, then "
                             + "summarise.",
                     "Render https://example.com with web_browser and summarise the headline.",
-                    new BrowserTool());
+                    mocks ? new MockWebBrowserTool() : new BrowserTool());
             case "safe_download" -> new Scenario(
                     "You are a research assistant with access to a single tool, safe_download. "
                             + "It saves a remote file to a sandbox and returns a Source record. "
@@ -191,7 +198,7 @@ public final class ToolSmoke {
                             + "with that url, then report the local path and sha256.",
                     "Download https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf "
                             + "using safe_download and tell me the sha256 it returned.",
-                    new SafeDownloadTool());
+                    mocks ? new MockSafeDownloadTool() : new SafeDownloadTool());
             case "cite" -> new Scenario(
                     "You are a research assistant with access to a single tool, cite. "
                             + "Call cite exactly once with the url, title, excerpt, and sha256 the "
@@ -201,7 +208,7 @@ public final class ToolSmoke {
                             + "  title: Example Domain\n"
                             + "  excerpt: This domain is for use in illustrative examples in documents.\n"
                             + "  sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-                    new CiteTool());
+                    mocks ? new MockCiteTool() : new CiteTool());
             default -> null;
         };
     }
