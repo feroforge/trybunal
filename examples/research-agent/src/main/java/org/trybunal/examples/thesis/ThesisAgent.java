@@ -36,12 +36,13 @@ public final class ThesisAgent {
     public static void main(String[] args) throws Exception {
         String ticker = (args.length > 0) ? args[0] : "AAPL";
         String modelName = System.getProperty("trybunal.model", "llama3.1:8b");
+        int maxIter = Integer.parseInt(System.getProperty("trybunal.maxIter", "16"));
         ModelId model = new ModelId("ollama", modelName);
 
         Path outDir = Path.of("build", "thesis", ticker);
         Files.createDirectories(outDir);
 
-        try (Orchestrator orch = Orchestrator.autoDiscover()) {
+        try (Orchestrator orch = Orchestrator.autoDiscover(maxIter)) {
             for (ThesisSections.Section section : ThesisSections.ALL) {
                 Path file = outDir.resolve(section.slug() + ".md");
                 System.out.println("→ " + section.slug());

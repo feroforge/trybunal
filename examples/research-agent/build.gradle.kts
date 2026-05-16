@@ -22,6 +22,20 @@ application {
     mainClass.set("org.trybunal.examples.thesis.ThesisAgent")
 }
 
+// Forward -Dtrybunal.* flags to the default `run` task (ThesisAgent). Without
+// this, system properties set on the outer Gradle invocation never reach the
+// forked JVM that runs the agent.
+tasks.named<JavaExec>("run") {
+    doFirst {
+        System.getProperties().forEach { k, v ->
+            val key = k.toString()
+            if (key.startsWith("trybunal.") || key.startsWith("org.slf4j.")) {
+                systemProperty(key, v.toString())
+            }
+        }
+    }
+}
+
 // Companion task: multi-model evaluation of the gathering sub-agent.
 // Usage: ./gradlew :examples:research-agent:thesisEval \
 //          -Dtrybunal.models=llama3.1:8b,mistral-small:24b -Dtrybunal.ticker=AAPL
@@ -37,7 +51,9 @@ tasks.register<JavaExec>("thesisEval") {
     doFirst {
         System.getProperties().forEach { k, v ->
             val key = k.toString()
-            if (key.startsWith("trybunal.")) systemProperty(key, v.toString())
+            if (key.startsWith("trybunal.") || key.startsWith("org.slf4j.")) {
+                systemProperty(key, v.toString())
+            }
         }
     }
 }
@@ -48,4 +64,12 @@ tasks.register<JavaExec>("researchAgent") {
     description = "Run the original single-call ResearchAgent (one ticker, one prompt)."
     classpath = sourceSets["main"].runtimeClasspath
     mainClass.set("org.trybunal.examples.ResearchAgent")
+    doFirst {
+        System.getProperties().forEach { k, v ->
+            val key = k.toString()
+            if (key.startsWith("trybunal.") || key.startsWith("org.slf4j.")) {
+                systemProperty(key, v.toString())
+            }
+        }
+    }
 }
