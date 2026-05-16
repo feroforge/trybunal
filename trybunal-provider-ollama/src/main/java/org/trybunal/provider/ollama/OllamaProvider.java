@@ -117,30 +117,69 @@ public final class OllamaProvider implements ModelProvider {
                 .POST(HttpRequest.BodyPublishers.ofString(json))
                 .build();
 
+        // Ollama occasionally returns an "empty placeholder" response —
+        // {"model":"","done":false,"message":{"role":"","content":""}} —
+        // for valid requests, especially during multi-tool ReAct loops on
+        // gemma3-family models. The same request often succeeds on retry,
+        // so we transparently retry up to RETRY_LIMIT times with a short
+        // back-off before surfacing the failure.
         Instant startedAt = Instant.now();
-        HttpResponse<String> resp;
-        try {
-            resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-        } catch (Exception e) {
-            throw new RuntimeException("ollama transport error: " + e.getMessage(), e);
+        InvocationResult result = null;
+        HttpResponse<String> resp = null;
+        for (int attempt = 1; attempt <= RETRY_LIMIT; attempt++) {
+            try {
+                resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            } catch (Exception e) {
+                throw new RuntimeException("ollama transport error: " + e.getMessage(), e);
+            }
+            if (resp.statusCode() / 100 != 2) {
+                throw new RuntimeException("ollama returned " + resp.statusCode() + ": " + resp.body());
+            }
+            JsonNode root;
+            try {
+                root = JSON.readTree(resp.body());
+            } catch (Exception e) {
+                throw new RuntimeException("failed to parse ollama response", e);
+            }
+            result = decodeResponse(root, modelId, startedAt);
+            if (!isEmptyPlaceholder(result)) break;
+            log.warn("ollama empty-placeholder response on attempt {}/{}; retrying after backoff",
+                    attempt, RETRY_LIMIT);
+            try { Thread.sleep(EMPTY_RETRY_BACKOFF_MS); }
+            catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
         }
-        if (resp.statusCode() / 100 != 2) {
-            throw new RuntimeException("ollama returned " + resp.statusCode() + ": " + resp.body());
-        }
-
-        JsonNode root;
-        try {
-            root = JSON.readTree(resp.body());
-        } catch (Exception e) {
-            throw new RuntimeException("failed to parse ollama response", e);
-        }
-
-        InvocationResult result = decodeResponse(root, modelId, startedAt);
         var meta = result.metadata();
         log.debug("ollama call done finish={} promptTok={} complTok={} thinking={}",
                 meta.finishReason(), meta.promptTokens(), meta.completionTokens(),
                 meta.providerExtras().containsKey("thinking"));
+        if (isEmptyPlaceholder(result)) {
+            log.warn("ollama returned empty placeholder after {} retries; req-len={} resp-len={} resp-body: {}",
+                    RETRY_LIMIT, json.length(),
+                    resp == null ? 0 : resp.body().length(),
+                    resp == null ? "" : resp.body().substring(0, Math.min(resp.body().length(), 1000)));
+        }
         return result;
+    }
+
+    /** Number of attempts (initial + retries) for the empty-placeholder workaround. */
+    private static final int RETRY_LIMIT = 3;
+
+    /** Back-off between empty-placeholder retries. Short — Ollama recovers fast. */
+    private static final long EMPTY_RETRY_BACKOFF_MS = 500L;
+
+    /**
+     * Detects the empty-placeholder response Ollama sometimes returns instead
+     * of an actual model output. Distinguished by null finish reason, empty
+     * content, no tool calls, and null token counts — the Go zero-value of
+     * the ChatResponse struct.
+     */
+    private static boolean isEmptyPlaceholder(InvocationResult result) {
+        var meta = result.metadata();
+        return meta.finishReason() == null
+                && meta.promptTokens() == null
+                && meta.completionTokens() == null
+                && (result.reply().content() == null || result.reply().content().isEmpty())
+                && result.reply().toolCalls().isEmpty();
     }
 
     /**
@@ -200,6 +239,28 @@ public final class OllamaProvider implements ModelProvider {
             ObjectNode node = JSON.createObjectNode();
             node.put("role", roleOf(m));
             node.put("content", m.content());
+            // Ollama expects tool_calls echoed back on the assistant turn that
+            // produced them. Without this, ReAct loops break on the SECOND
+            // round-trip: Ollama sees `assistant("") → tool(result)` with no
+            // call linking the two, treats the assistant turn as malformed,
+            // and on some models returns an empty placeholder
+            // {"done":false,"message":{"role":"","content":""}} that crashes
+            // the rest of the loop. Affected: gemma4:26b on multi-tool runs.
+            if (m instanceof Message.Assistant a && !a.toolCalls().isEmpty()) {
+                ArrayNode tcArr = JSON.createArrayNode();
+                for (ToolCall tc : a.toolCalls()) {
+                    ObjectNode tcNode = JSON.createObjectNode();
+                    if (tc.id() != null && !tc.id().isBlank()) {
+                        tcNode.put("id", tc.id());
+                    }
+                    ObjectNode fn = JSON.createObjectNode();
+                    fn.put("name", tc.toolName());
+                    fn.set("arguments", JSON.valueToTree(tc.arguments()));
+                    tcNode.set("function", fn);
+                    tcArr.add(tcNode);
+                }
+                node.set("tool_calls", tcArr);
+            }
             arr.add(node);
         }
         return arr;
