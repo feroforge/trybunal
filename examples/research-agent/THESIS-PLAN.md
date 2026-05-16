@@ -41,3 +41,33 @@ Each sub-agent stops when its file contains:
 
 That's it. The thesis writer reads these seven files and the shared
 `citations.md` bibliography, then drafts.
+
+## Subagent variant
+
+`ThesisManager` (`./gradlew :examples:research-agent:thesisManager
+--args="AAPL"`) is an alternative wiring of the same seven sections.
+Instead of one flat ReAct loop per section it runs a *manager* model that
+sees two subagents — registered as plain tools via
+`org.trybunal.core.Subagents.asTool` — and decides per section how to
+call them:
+
+| Subagent    | Tools                                  | Job                                                                 |
+|-------------|----------------------------------------|---------------------------------------------------------------------|
+| `gather`    | `web_fetch`, `safe_download`, `cite`   | Collect cited facts for the section the manager hands it.           |
+| `summarise` | (none)                                 | Turn the gathered notes into the final markdown for the section.    |
+
+Each section becomes a manager turn: the manager calls `gather(task=...)`
+to fetch facts, then `summarise(task=...)` with those facts to produce
+the section markdown. The manager's conversation stays small because it
+only sees each subagent's final string, not the tool calls underneath.
+
+The subagent's ReAct cap is independent of the manager's
+(`-Dtrybunal.workerMaxIter=N` overrides it). Both subagents share the
+parent's `ModelProvider` instance — no extra HttpClient — and are
+constructed in a try-with-resources block alongside the manager
+orchestrator so their inner executors shut down deterministically when
+the run ends.
+
+Output shape is identical to `ThesisAgent`: one markdown file per
+section under `build/thesis/<TICKER>/` plus the shared `citations.md`
+bibliography.

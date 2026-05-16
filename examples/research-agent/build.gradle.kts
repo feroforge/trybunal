@@ -59,6 +59,25 @@ tasks.register<JavaExec>("thesisEval") {
     }
 }
 
+// Companion task: subagent-as-tool variant of the thesis runner. Manager
+// model dispatches `gather` + `summarise` subagents per section.
+// Usage: ./gradlew :examples:research-agent:thesisManager \
+//          --args="AAPL" -Dtrybunal.model=gemma4:26b -Dtrybunal.useMocks=true
+tasks.register<JavaExec>("thesisManager") {
+    group = "application"
+    description = "Run the subagent-as-tool thesis manager."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("org.trybunal.examples.thesis.ThesisManager")
+    doFirst {
+        System.getProperties().forEach { k, v ->
+            val key = k.toString()
+            if (key.startsWith("trybunal.") || key.startsWith("org.slf4j.")) {
+                systemProperty(key, v.toString())
+            }
+        }
+    }
+}
+
 // Companion task: original single-call ResearchAgent demo, kept reachable.
 tasks.register<JavaExec>("researchAgent") {
     group = "application"
