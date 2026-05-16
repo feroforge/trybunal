@@ -17,6 +17,7 @@ include(
     "trybunal-tool-safe-download",
     "trybunal-tool-citations",
     "trybunal-tool-mocks",
+    "trybunal-compactor-tool-results",
     "examples:hello",
     "examples:eval-demo",
     "examples:agentic-eval",

@@ -24,6 +24,7 @@ import org.trybunal.api.model.InvocationResult;
 import org.trybunal.api.model.Message;
 import org.trybunal.api.model.ModelId;
 import org.trybunal.api.model.PromptSession;
+import org.trybunal.api.spi.ConversationCompactor;
 import org.trybunal.api.spi.Evaluator;
 import org.trybunal.api.spi.ModelHarness;
 import org.trybunal.api.spi.ModelProvider;
@@ -49,18 +50,27 @@ public final class Orchestrator implements AutoCloseable {
     /** System property to override {@link #DEFAULT_MAX_TOOL_ITERATIONS}. */
     public static final String MAX_ITER_PROPERTY = "trybunal.maxToolIterations";
 
+    /** System property to pick a specific {@link ConversationCompactor} by id when multiple are on the classpath. */
+    public static final String COMPACTOR_PROPERTY = "trybunal.compactor";
+
     private final Map<String, ModelHarness> harnesses;
     private final List<Evaluator> evaluators;
     private final List<Tool> tools;
+    private final ConversationCompactor compactor;
     private final ExecutorService executor;
     private final int maxToolIterations;
 
     private Orchestrator(List<ModelProvider> providers, List<Evaluator> evaluators, List<Tool> tools) {
-        this(providers, evaluators, tools, resolveDefaultCap());
+        this(providers, evaluators, tools, discoverCompactor(), resolveDefaultCap());
     }
 
     private Orchestrator(List<ModelProvider> providers, List<Evaluator> evaluators, List<Tool> tools,
                          int maxToolIterations) {
+        this(providers, evaluators, tools, discoverCompactor(), maxToolIterations);
+    }
+
+    private Orchestrator(List<ModelProvider> providers, List<Evaluator> evaluators, List<Tool> tools,
+                         ConversationCompactor compactor, int maxToolIterations) {
         if (maxToolIterations < 1) {
             throw new IllegalArgumentException("maxToolIterations must be >= 1");
         }
@@ -72,6 +82,7 @@ public final class Orchestrator implements AutoCloseable {
         }
         this.tools = List.copyOf(tools);
         this.evaluators = List.copyOf(evaluators);
+        this.compactor = compactor;
         this.maxToolIterations = maxToolIterations;
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
 
@@ -80,9 +91,34 @@ public final class Orchestrator implements AutoCloseable {
             Objects.requireNonNull(p.id(), "provider id");
             ModelHarness base = new DefaultModelHarness(p);
             byId.put(p.id(), this.tools.isEmpty() ? base :
-                    new ToolCallingHarness(base, this.tools, this.maxToolIterations, this.executor));
+                    new ToolCallingHarness(base, this.tools, this.maxToolIterations,
+                            this.executor, this.compactor));
         }
         this.harnesses = Map.copyOf(byId);
+    }
+
+    /**
+     * Discovers a {@link ConversationCompactor} via {@link ServiceLoader}.
+     * When multiple implementations are present, {@code -Dtrybunal.compactor=<id>}
+     * selects by id; otherwise the first registered implementation wins.
+     * Returns {@code null} when no implementation is on the classpath.
+     */
+    private static ConversationCompactor discoverCompactor() {
+        var discovered = new ArrayList<ConversationCompactor>();
+        for (ConversationCompactor c : ServiceLoader.load(ConversationCompactor.class)) {
+            log.info("registered compactor id={} class={}", c.id(), c.getClass().getName());
+            discovered.add(c);
+        }
+        if (discovered.isEmpty()) return null;
+        String want = System.getProperty(COMPACTOR_PROPERTY);
+        if (want != null && !want.isBlank()) {
+            for (ConversationCompactor c : discovered) {
+                if (want.equals(c.id())) return c;
+            }
+            log.warn("no compactor with id='{}' found; falling back to '{}'",
+                    want, discovered.get(0).id());
+        }
+        return discovered.get(0);
     }
 
     private static int resolveDefaultCap() {
@@ -178,9 +214,35 @@ public final class Orchestrator implements AutoCloseable {
         return new Orchestrator(providers, evaluators, tools, maxToolIterations);
     }
 
+    /**
+     * Builds an orchestrator with an explicitly injected {@link ConversationCompactor}.
+     * Pass {@code null} to disable compaction entirely (the harness will skip the call).
+     *
+     * @param providers          model providers; defensively copied
+     * @param evaluators         evaluators; defensively copied
+     * @param tools              tools to register; names must be unique; defensively copied
+     * @param compactor          conversation compactor; may be {@code null}
+     * @param maxToolIterations  ReAct cap; must be &gt;= 1
+     * @throws IllegalStateException    if two tools share the same name
+     * @throws IllegalArgumentException if {@code maxToolIterations < 1}
+     */
+    public static Orchestrator of(List<ModelProvider> providers, List<Evaluator> evaluators,
+                                  List<Tool> tools, ConversationCompactor compactor,
+                                  int maxToolIterations) {
+        return new Orchestrator(providers, evaluators, tools, compactor, maxToolIterations);
+    }
+
     /** The current ReAct iteration cap. */
     public int maxToolIterations() {
         return maxToolIterations;
+    }
+
+    /**
+     * The active {@link ConversationCompactor}, or {@code null} when none is wired.
+     * The harness skips compaction entirely in the {@code null} case.
+     */
+    public ConversationCompactor compactor() {
+        return compactor;
     }
 
     /**

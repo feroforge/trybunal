@@ -17,6 +17,9 @@ import org.trybunal.api.model.InvocationResult;
 import org.trybunal.api.model.Message;
 import org.trybunal.api.model.ModelId;
 import org.trybunal.api.model.ToolCall;
+import org.trybunal.api.spi.CompactionRequest;
+import org.trybunal.api.spi.CompactionResult;
+import org.trybunal.api.spi.ConversationCompactor;
 import org.trybunal.api.spi.ModelHarness;
 import org.trybunal.api.spi.Tool;
 import org.trybunal.api.tool.ToolResult;
@@ -47,6 +50,9 @@ public final class ToolCallingHarness implements ModelHarness {
     /** System property that overrides {@link #DEFAULT_HEADROOM_WARN}. */
     static final String HEADROOM_WARN_PROPERTY = "trybunal.contextHeadroomWarn";
 
+    /** System property that overrides {@link #DEFAULT_COMPACTION_THRESHOLD}. */
+    static final String COMPACTION_THRESHOLD_PROPERTY = "trybunal.compactionThreshold";
+
     /**
      * Default low-context-headroom WARN threshold in tokens. When the
      * provider reports a {@link ContextWindow} whose {@link
@@ -56,11 +62,36 @@ public final class ToolCallingHarness implements ModelHarness {
     static final int DEFAULT_HEADROOM_WARN = 256;
 
     /**
+     * Default headroom threshold below which the harness invokes the
+     * {@link ConversationCompactor} (if one is configured) before
+     * issuing the next provider call. Twice {@link #DEFAULT_HEADROOM_WARN}.
+     */
+    static final int DEFAULT_COMPACTION_THRESHOLD = 512;
+
+    /**
      * Reads the configured headroom-warn threshold from
      * {@code -Dtrybunal.contextHeadroomWarn=N}. Invalid or absent values
      * fall back to {@link #DEFAULT_HEADROOM_WARN}, with at most one WARN
      * emitted per harness construction so log noise stays bounded.
      */
+    private static int resolveCompactionThreshold() {
+        String raw = System.getProperty(COMPACTION_THRESHOLD_PROPERTY);
+        if (raw == null || raw.isBlank()) return DEFAULT_COMPACTION_THRESHOLD;
+        try {
+            int v = Integer.parseInt(raw.trim());
+            if (v < 0) {
+                log.warn("invalid {}='{}' (must be >= 0); falling back to {}",
+                        COMPACTION_THRESHOLD_PROPERTY, raw, DEFAULT_COMPACTION_THRESHOLD);
+                return DEFAULT_COMPACTION_THRESHOLD;
+            }
+            return v;
+        } catch (NumberFormatException e) {
+            log.warn("invalid {}='{}' (not an integer); falling back to {}",
+                    COMPACTION_THRESHOLD_PROPERTY, raw, DEFAULT_COMPACTION_THRESHOLD);
+            return DEFAULT_COMPACTION_THRESHOLD;
+        }
+    }
+
     private static int resolveHeadroomWarn() {
         String raw = System.getProperty(HEADROOM_WARN_PROPERTY);
         if (raw == null || raw.isBlank()) return DEFAULT_HEADROOM_WARN;
@@ -84,15 +115,27 @@ public final class ToolCallingHarness implements ModelHarness {
     private final int maxIterations;
     private final ExecutorService executor;
     private final int headroomWarn;
+    private final ConversationCompactor compactor;
+    private final int compactionThreshold;
+
+    /**
+     * Convenience constructor without compaction. Equivalent to passing
+     * {@code null} for the compactor.
+     */
+    public ToolCallingHarness(ModelHarness delegate, List<Tool> tools, int maxIterations,
+                              ExecutorService executor) {
+        this(delegate, tools, maxIterations, executor, null);
+    }
 
     /**
      * @param delegate      base harness; never null
      * @param tools         tools to advertise+dispatch; defensively copied; names must be unique
      * @param maxIterations &gt;= 1; recommended 8
      * @param executor      virtual-thread executor used to fan out tool calls; never null
+     * @param compactor     optional {@link ConversationCompactor}; may be null (no compaction)
      */
     public ToolCallingHarness(ModelHarness delegate, List<Tool> tools, int maxIterations,
-                              ExecutorService executor) {
+                              ExecutorService executor, ConversationCompactor compactor) {
         if (delegate == null) throw new IllegalArgumentException("delegate required");
         if (tools == null) throw new IllegalArgumentException("tools required");
         if (maxIterations < 1) throw new IllegalArgumentException("maxIterations must be >= 1");
@@ -112,6 +155,8 @@ public final class ToolCallingHarness implements ModelHarness {
         this.maxIterations = maxIterations;
         this.executor = executor;
         this.headroomWarn = resolveHeadroomWarn();
+        this.compactor = compactor;
+        this.compactionThreshold = resolveCompactionThreshold();
     }
 
     @Override
@@ -120,11 +165,14 @@ public final class ToolCallingHarness implements ModelHarness {
         List<Message> conv = new ArrayList<>(conversation);
 
         InvocationResult lastResult = null;
+        ContextWindow lastWindow = null;
         for (int iter = 1; iter <= maxIterations; iter++) {
             MDC.put("iteration", String.valueOf(iter));
             try {
+                conv = maybeCompact(conv, lastWindow, modelId);
                 lastResult = delegate.run(conv, modelId, mergedParams);
-                warnIfLowHeadroom(lastResult.metadata().contextWindow());
+                lastWindow = lastResult.metadata().contextWindow();
+                warnIfLowHeadroom(lastWindow);
                 List<ToolCall> toolCalls = lastResult.reply().toolCalls();
                 log.debug("iter={} toolCalls={}", iter, toolCalls.size());
 
@@ -157,6 +205,34 @@ public final class ToolCallingHarness implements ModelHarness {
                 lastResult.reply().toolCalls()
         );
         return new InvocationResult(capReply, capMeta);
+    }
+
+    /**
+     * Invokes the configured {@link ConversationCompactor} when the last
+     * provider turn reported a {@link ContextWindow} with headroom below
+     * {@link #compactionThreshold}. No-op when the compactor is unset, the
+     * window is unknown (first turn), or headroom is comfortable.
+     *
+     * @return the possibly-compacted conversation (always a fresh mutable
+     *         {@link ArrayList}; the input is never aliased).
+     */
+    private List<Message> maybeCompact(List<Message> conv, ContextWindow lastWindow, ModelId modelId) {
+        if (compactor == null || lastWindow == null) return conv;
+        if (lastWindow.headroom() >= compactionThreshold) return conv;
+
+        int target = Math.max(compactionThreshold, lastWindow.numCtx() / 4);
+        CompactionRequest req = new CompactionRequest(conv, lastWindow, target, modelId);
+        CompactionResult res = compactor.compact(req);
+        if (res.messagesRewritten() + res.messagesDropped() == 0) return conv;
+
+        MDC.put("compaction", "true");
+        try {
+            log.info("compacted conversation: rewrote {}, dropped {}, ~{} tokens freed",
+                    res.messagesRewritten(), res.messagesDropped(), res.approximateTokensFreed());
+        } finally {
+            MDC.remove("compaction");
+        }
+        return new ArrayList<>(res.conversation());
     }
 
     /**

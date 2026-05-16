@@ -18,6 +18,10 @@ import org.trybunal.api.model.InvocationResult;
 import org.trybunal.api.model.Message;
 import org.trybunal.api.model.ModelId;
 import org.trybunal.api.model.ToolCall;
+import org.trybunal.api.model.ContextWindow;
+import org.trybunal.api.spi.CompactionRequest;
+import org.trybunal.api.spi.CompactionResult;
+import org.trybunal.api.spi.ConversationCompactor;
 import org.trybunal.api.spi.ModelHarness;
 import org.trybunal.api.spi.Tool;
 import org.trybunal.api.tool.ToolResult;
@@ -35,6 +39,13 @@ class ToolCallingHarnessTest {
     private static InvocationResult result(String content, List<ToolCall> toolCalls) {
         var meta = new InvocationMetadata(MODEL, Instant.now(), Duration.ofMillis(1),
                 null, null, toolCalls, "stop");
+        return new InvocationResult(new Message.Assistant(content, toolCalls), meta);
+    }
+
+    private static InvocationResult resultWithWindow(String content, List<ToolCall> toolCalls,
+                                                     ContextWindow cw) {
+        var meta = new InvocationMetadata(MODEL, Instant.now(), Duration.ofMillis(1),
+                null, null, toolCalls, "stop", Map.of(), cw);
         return new InvocationResult(new Message.Assistant(content, toolCalls), meta);
     }
 
@@ -236,5 +247,94 @@ class ToolCallingHarnessTest {
 
         assertEquals("caller version", merged.description(),
                 "caller's tool spec should win on name collision");
+    }
+
+    // 8. Compactor: when injected and headroom is low, harness invokes it.
+    @Test
+    void compactorInvokedWhenHeadroomBelowThreshold() {
+        var toolCall = new ToolCall("id-1", "echo", Map.of());
+        Tool echo = stubTool("echo", ToolResult.ok("echoed"));
+
+        // Iteration 1: report a ContextWindow with very low headroom + a tool call,
+        // so iteration 2 triggers compaction.
+        var lowHeadroom = new ContextWindow(3900, 4096); // headroom=196 < default 512
+        AtomicInteger callCount = new AtomicInteger();
+        ModelHarness delegate = (conv, m, p) -> {
+            int n = callCount.incrementAndGet();
+            if (n == 1) {
+                return resultWithWindow("", List.of(toolCall), lowHeadroom);
+            }
+            return result("done");
+        };
+
+        AtomicInteger compactCount = new AtomicInteger();
+        List<CompactionRequest> capturedRequests = new CopyOnWriteArrayList<>();
+        ConversationCompactor compactor = new ConversationCompactor() {
+            @Override public String id() { return "fake"; }
+            @Override public CompactionResult compact(CompactionRequest req) {
+                compactCount.incrementAndGet();
+                capturedRequests.add(req);
+                // Pretend to rewrite one message so the harness logs and swaps the list.
+                return new CompactionResult(req.conversation(), 1, 0, 100L);
+            }
+        };
+
+        var harness = new ToolCallingHarness(delegate, List.of(echo), 8, virtualExecutor(), compactor);
+        InvocationResult result = harness.run(List.of(new Message.User("hi")), MODEL, DEFAULTS);
+
+        assertEquals("done", result.reply().content());
+        assertEquals(1, compactCount.get(), "compactor should be invoked exactly once");
+        assertEquals(MODEL, capturedRequests.get(0).modelId());
+        assertSame(lowHeadroom, capturedRequests.get(0).currentWindow());
+    }
+
+    // 9. Compactor: not invoked when headroom is comfortable.
+    @Test
+    void compactorSkippedWhenHeadroomAboveThreshold() {
+        var toolCall = new ToolCall("id-1", "echo", Map.of());
+        Tool echo = stubTool("echo", ToolResult.ok("echoed"));
+
+        var roomy = new ContextWindow(100, 4096); // headroom=3996
+        AtomicInteger callCount = new AtomicInteger();
+        ModelHarness delegate = (conv, m, p) -> {
+            int n = callCount.incrementAndGet();
+            if (n == 1) return resultWithWindow("", List.of(toolCall), roomy);
+            return result("done");
+        };
+
+        AtomicInteger compactCount = new AtomicInteger();
+        ConversationCompactor compactor = new ConversationCompactor() {
+            @Override public String id() { return "fake"; }
+            @Override public CompactionResult compact(CompactionRequest req) {
+                compactCount.incrementAndGet();
+                return new CompactionResult(req.conversation(), 0, 0, 0L);
+            }
+        };
+
+        var harness = new ToolCallingHarness(delegate, List.of(echo), 8, virtualExecutor(), compactor);
+        harness.run(List.of(new Message.User("hi")), MODEL, DEFAULTS);
+
+        assertEquals(0, compactCount.get(), "comfortable headroom must skip compaction");
+    }
+
+    // 10. Null compactor: harness behaves exactly like Phase 4.
+    @Test
+    void nullCompactorPathBehavesAsBefore() {
+        var toolCall = new ToolCall("id-1", "echo", Map.of());
+        Tool echo = stubTool("echo", ToolResult.ok("echoed"));
+
+        var lowHeadroom = new ContextWindow(3900, 4096);
+        AtomicInteger callCount = new AtomicInteger();
+        ModelHarness delegate = (conv, m, p) -> {
+            int n = callCount.incrementAndGet();
+            if (n == 1) return resultWithWindow("", List.of(toolCall), lowHeadroom);
+            return result("done");
+        };
+
+        // No compactor passed: low-headroom turn must still proceed normally.
+        var harness = new ToolCallingHarness(delegate, List.of(echo), 8, virtualExecutor(), null);
+        InvocationResult result = harness.run(List.of(new Message.User("hi")), MODEL, DEFAULTS);
+
+        assertEquals("done", result.reply().content());
     }
 }
