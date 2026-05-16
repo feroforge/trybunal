@@ -20,6 +20,7 @@ include(
     "examples:hello",
     "examples:eval-demo",
     "examples:agentic-eval",
+    "examples:probe-context-limit",
     "examples:probe-tool-format",
     "examples:research-agent",
     "examples:tool-smoke"

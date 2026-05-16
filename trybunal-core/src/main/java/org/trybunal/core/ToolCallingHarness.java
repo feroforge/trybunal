@@ -10,6 +10,7 @@ import java.util.concurrent.Future;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.trybunal.api.model.ContextWindow;
 import org.trybunal.api.model.GenerationParams;
 import org.trybunal.api.model.InvocationMetadata;
 import org.trybunal.api.model.InvocationResult;
@@ -43,10 +44,46 @@ public final class ToolCallingHarness implements ModelHarness {
 
     private static final Logger log = LoggerFactory.getLogger(ToolCallingHarness.class);
 
+    /** System property that overrides {@link #DEFAULT_HEADROOM_WARN}. */
+    static final String HEADROOM_WARN_PROPERTY = "trybunal.contextHeadroomWarn";
+
+    /**
+     * Default low-context-headroom WARN threshold in tokens. When the
+     * provider reports a {@link ContextWindow} whose {@link
+     * ContextWindow#headroom()} drops below this value, the harness
+     * logs a WARN with MDC key {@code headroom}.
+     */
+    static final int DEFAULT_HEADROOM_WARN = 256;
+
+    /**
+     * Reads the configured headroom-warn threshold from
+     * {@code -Dtrybunal.contextHeadroomWarn=N}. Invalid or absent values
+     * fall back to {@link #DEFAULT_HEADROOM_WARN}, with at most one WARN
+     * emitted per harness construction so log noise stays bounded.
+     */
+    private static int resolveHeadroomWarn() {
+        String raw = System.getProperty(HEADROOM_WARN_PROPERTY);
+        if (raw == null || raw.isBlank()) return DEFAULT_HEADROOM_WARN;
+        try {
+            int v = Integer.parseInt(raw.trim());
+            if (v < 0) {
+                log.warn("invalid {}='{}' (must be >= 0); falling back to {}",
+                        HEADROOM_WARN_PROPERTY, raw, DEFAULT_HEADROOM_WARN);
+                return DEFAULT_HEADROOM_WARN;
+            }
+            return v;
+        } catch (NumberFormatException e) {
+            log.warn("invalid {}='{}' (not an integer); falling back to {}",
+                    HEADROOM_WARN_PROPERTY, raw, DEFAULT_HEADROOM_WARN);
+            return DEFAULT_HEADROOM_WARN;
+        }
+    }
+
     private final ModelHarness delegate;
     private final Map<String, Tool> toolsByName;
     private final int maxIterations;
     private final ExecutorService executor;
+    private final int headroomWarn;
 
     /**
      * @param delegate      base harness; never null
@@ -74,6 +111,7 @@ public final class ToolCallingHarness implements ModelHarness {
         this.toolsByName = Map.copyOf(byName);
         this.maxIterations = maxIterations;
         this.executor = executor;
+        this.headroomWarn = resolveHeadroomWarn();
     }
 
     @Override
@@ -86,6 +124,7 @@ public final class ToolCallingHarness implements ModelHarness {
             MDC.put("iteration", String.valueOf(iter));
             try {
                 lastResult = delegate.run(conv, modelId, mergedParams);
+                warnIfLowHeadroom(lastResult.metadata().contextWindow());
                 List<ToolCall> toolCalls = lastResult.reply().toolCalls();
                 log.debug("iter={} toolCalls={}", iter, toolCalls.size());
 
@@ -110,13 +149,33 @@ public final class ToolCallingHarness implements ModelHarness {
                 lastResult.metadata().completionTokens(),
                 lastResult.metadata().toolCalls(),
                 "tool-iteration-cap",
-                lastResult.metadata().providerExtras()
+                lastResult.metadata().providerExtras(),
+                lastResult.metadata().contextWindow()
         );
         Message.Assistant capReply = new Message.Assistant(
                 "[tool iteration cap reached]\n" + lastResult.reply().content(),
                 lastResult.reply().toolCalls()
         );
         return new InvocationResult(capReply, capMeta);
+    }
+
+    /**
+     * Emits a WARN with MDC key {@code headroom} when the provider-reported
+     * context window has fewer than {@link #headroomWarn} tokens left. The
+     * harness does not act on the signal in Phase 5 task 02; compaction lands
+     * in task 03. No-op when {@code cw} is null or above threshold.
+     */
+    private void warnIfLowHeadroom(ContextWindow cw) {
+        if (cw == null) return;
+        int headroom = cw.headroom();
+        if (headroom >= headroomWarn) return;
+        MDC.put("headroom", Integer.toString(headroom));
+        try {
+            log.warn("low context headroom: {} tokens left of {} (prompt={})",
+                    headroom, cw.numCtx(), cw.promptTokens());
+        } finally {
+            MDC.remove("headroom");
+        }
     }
 
     private GenerationParams mergeTools(GenerationParams params) {

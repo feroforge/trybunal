@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.trybunal.api.model.ContextWindow;
 import org.trybunal.api.model.GenerationParams;
 import org.trybunal.api.model.InvocationMetadata;
 import org.trybunal.api.model.InvocationResult;
@@ -50,6 +51,14 @@ public final class OllamaProvider implements ModelProvider {
      * write the answer directly, dramatically cutting latency on structured-output cases.
      */
     private static final Set<String> TOP_LEVEL_OPTIONS = Set.of("think", "format", "keep_alive");
+
+    /**
+     * Ollama loads every model with {@code num_ctx=4096} by default,
+     * regardless of the modelcard maximum. We surface this as the
+     * effective {@link ContextWindow#numCtx()} ceiling whenever the
+     * caller hasn't set {@code options.num_ctx} explicitly.
+     */
+    static final int DEFAULT_NUM_CTX = 4096;
 
     private final URI baseUri;
     private final HttpClient http;
@@ -123,6 +132,11 @@ public final class OllamaProvider implements ModelProvider {
         // gemma3-family models. The same request often succeeds on retry,
         // so we transparently retry up to RETRY_LIMIT times with a short
         // back-off before surfacing the failure.
+        // Resolve the effective num_ctx for the ContextWindow snapshot.
+        // Ollama silently loads every model at num_ctx=4096 unless the caller
+        // hoisted an explicit value into providerExtras; we mirror that here.
+        int effectiveNumCtx = resolveNumCtx(params);
+
         Instant startedAt = Instant.now();
         InvocationResult result = null;
         HttpResponse<String> resp = null;
@@ -141,7 +155,7 @@ public final class OllamaProvider implements ModelProvider {
             } catch (Exception e) {
                 throw new RuntimeException("failed to parse ollama response", e);
             }
-            result = decodeResponse(root, modelId, startedAt);
+            result = decodeResponse(root, modelId, startedAt, effectiveNumCtx);
             if (!isEmptyPlaceholder(result)) break;
             log.warn("ollama empty-placeholder response on attempt {}/{}; retrying after backoff",
                     attempt, RETRY_LIMIT);
@@ -193,7 +207,16 @@ public final class OllamaProvider implements ModelProvider {
      * entirely — and the thinking is exactly what's useful when a content
      * field comes back empty.</p>
      */
+    /**
+     * Backwards-compatible overload that assumes the Ollama default
+     * {@code num_ctx=4096}. Existing callers (and tests) that don't carry
+     * a request-side num_ctx through to the decoder route here.
+     */
     static InvocationResult decodeResponse(JsonNode root, ModelId modelId, Instant startedAt) {
+        return decodeResponse(root, modelId, startedAt, DEFAULT_NUM_CTX);
+    }
+
+    static InvocationResult decodeResponse(JsonNode root, ModelId modelId, Instant startedAt, int numCtx) {
         JsonNode message = root.path("message");
         String content = message.path("content").asText("");
         String thinking = message.path("thinking").asText("");
@@ -226,9 +249,19 @@ public final class OllamaProvider implements ModelProvider {
             extras = m;
         }
 
+        // Surface the configured context-window ceiling alongside the prompt
+        // token count so harnesses can detect low headroom and (Task 03)
+        // trigger compaction. When prompt_eval_count is absent (empty-
+        // placeholder responses) we leave contextWindow null — there's no
+        // promptTokens to anchor it to.
+        ContextWindow contextWindow = (promptTokens != null && numCtx > 0)
+                ? new ContextWindow(promptTokens, numCtx)
+                : null;
+
         var metadata = new InvocationMetadata(
                 modelId, startedAt, providerDuration,
-                promptTokens, completionTokens, toolCalls, finishReason, extras);
+                promptTokens, completionTokens, toolCalls, finishReason, extras,
+                contextWindow);
 
         return new InvocationResult(new Message.Assistant(content, toolCalls), metadata);
     }
@@ -273,6 +306,32 @@ public final class OllamaProvider implements ModelProvider {
             case Message.Assistant ignored -> "assistant";
             case Message.Tool ignored -> "tool";
         };
+    }
+
+    /**
+     * Picks the effective {@code num_ctx} for this call. If the caller hoisted
+     * an explicit {@code num_ctx} into {@link GenerationParams#providerExtras()}
+     * we honour it (parsing numeric strings defensively). Otherwise we fall
+     * back to Ollama's default of {@value #DEFAULT_NUM_CTX} — the modelcard
+     * maximum is not the loaded value and probing {@code /api/show} would lie
+     * about the runtime ceiling.
+     */
+    private static int resolveNumCtx(GenerationParams params) {
+        Object raw = params.providerExtras().get("num_ctx");
+        if (raw == null) return DEFAULT_NUM_CTX;
+        if (raw instanceof Number n) {
+            int v = n.intValue();
+            return v > 0 ? v : DEFAULT_NUM_CTX;
+        }
+        if (raw instanceof CharSequence cs) {
+            try {
+                int v = Integer.parseInt(cs.toString().trim());
+                return v > 0 ? v : DEFAULT_NUM_CTX;
+            } catch (NumberFormatException ignored) {
+                return DEFAULT_NUM_CTX;
+            }
+        }
+        return DEFAULT_NUM_CTX;
     }
 
     private static ObjectNode encodeOptions(GenerationParams params) {

@@ -19,6 +19,12 @@ import java.util.Map;
  * provider-defined and consumers must tolerate their absence. Always
  * non-null; {@link Map#of()} when nothing was reported.</p>
  *
+ * <p>{@code contextWindow} is a Phase-5 addition: when the provider can
+ * report both the configured context-window ceiling ({@code num_ctx} on
+ * Ollama) and the prompt-token count, it surfaces a {@link ContextWindow}
+ * snapshot here. {@code null} when the provider did not (or could not)
+ * report it.</p>
+ *
  * @param modelId          model that produced the result
  * @param startedAt        wall-clock instant the call was dispatched
  * @param latency          measured wall-clock duration of the call
@@ -27,6 +33,8 @@ import java.util.Map;
  * @param toolCalls        tool calls requested by the model; never null
  * @param finishReason     provider-native finish reason if reported, else null
  * @param providerExtras   provider-specific extras; never null, defensively copied
+ * @param contextWindow    context-window snapshot when the provider could
+ *                         report both ceiling and prompt size; else null
  */
 public record InvocationMetadata(
         ModelId modelId,
@@ -36,7 +44,8 @@ public record InvocationMetadata(
         Integer completionTokens,
         List<ToolCall> toolCalls,
         String finishReason,
-        Map<String, Object> providerExtras
+        Map<String, Object> providerExtras,
+        ContextWindow contextWindow
 ) {
     public InvocationMetadata {
         if (modelId == null) throw new IllegalArgumentException("modelId required");
@@ -44,6 +53,25 @@ public record InvocationMetadata(
         if (latency == null) throw new IllegalArgumentException("latency required");
         toolCalls = toolCalls == null ? List.of() : List.copyOf(toolCalls);
         providerExtras = providerExtras == null ? Map.of() : Map.copyOf(providerExtras);
+    }
+
+    /**
+     * Convenience constructor matching the pre-Phase-5 8-argument shape.
+     * Delegates to the canonical constructor with {@code contextWindow=null}
+     * so existing call sites continue to compile.
+     */
+    public InvocationMetadata(
+            ModelId modelId,
+            Instant startedAt,
+            Duration latency,
+            Integer promptTokens,
+            Integer completionTokens,
+            List<ToolCall> toolCalls,
+            String finishReason,
+            Map<String, Object> providerExtras
+    ) {
+        this(modelId, startedAt, latency, promptTokens, completionTokens,
+                toolCalls, finishReason, providerExtras, null);
     }
 
     /**
@@ -62,6 +90,6 @@ public record InvocationMetadata(
             String finishReason
     ) {
         this(modelId, startedAt, latency, promptTokens, completionTokens,
-                toolCalls, finishReason, Map.of());
+                toolCalls, finishReason, Map.of(), null);
     }
 }
